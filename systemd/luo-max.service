@@ -5,7 +5,7 @@ ConditionFileIsExecutable=/usr/local/bin/luo-max
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/luo-max daemon
-ExecStopPost=/usr/local/bin/luo-max restore
+ExecStopPost=/usr/local/bin/luo-max restore --offline
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=yes

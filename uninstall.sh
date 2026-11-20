@@ -37,6 +37,7 @@ if [[ -z $root ]]; then
     fi
     if [[ -f $unit ]]; then systemctl --root=/ disable luo-max.service; fi
     if [[ -f $init ]]; then update-rc.d -f luo-max remove; fi
+    rm -f -- /var/lib/luo-max/profile.json
 fi
 if [[ -L $bin && "$(readlink -- "$bin")" == ../lib/luo-max/luo-max.py ]]; then rm -- "$bin"; fi
 rm -f -- "$app/luo-max.py" "$app"/luomax/{__init__,cli,controller,gui,hardware}.py \

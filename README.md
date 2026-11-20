@@ -22,7 +22,17 @@ LUO-MAX (Linux Universal Optimizer) permite consultar el hardware y aplicar pol�
 
 Ejecuta los scripts desde la carpeta del repositorio. Si tenías un monitor manual en una terminal, detenlo con **Ctrl+C** antes de actualizar.
 
-**Funcionamiento permanente.** Después de instalar, puedes cerrar la terminal. El monitor permanece en segundo plano y se inicia en cada arranque. Tras reiniciar, LUO-MAX parte en Equilibrado y espera que elijas un perfil; Alto, Extremo y Máximo se seleccionan de nuevo cuando los necesitas. Así se combinan un monitor permanente con ajustes a demanda, inspirados en [GameMode de Feral Interactive](https://github.com/FeralInteractive/gamemode).
+**El perfil se conserva al reiniciar.** Con el servicio instalado (systemd o SysVinit), LUO-MAX guarda el último perfil aplicado correctamente desde la terminal o la interfaz gráfica y lo recupera en cada arranque. Si eliges **Equilibrado**, el sistema conserva su política habitual. Si eliges **Máximo**, el monitor vuelve a aplicarlo tras verificar sensores, temperatura y alimentación. La confirmación inicial de Máximo incluye su reactivación en futuros arranques, también con la opción NVIDIA si la autorizaste.
+
+Para actualizar una instalación existente, ejecuta `git pull` y `sudo ./install.sh` desde la carpeta del repositorio. Después selecciona el perfil una vez para guardarlo. Por ejemplo:
+
+```bash
+sudo luo-max perfil maximo --confirm-risks
+# O bien, para mantener Equilibrado en los siguientes arranques:
+sudo luo-max perfil equilibrado
+```
+
+Si el perfil guardado no se puede aplicar al arrancar, el monitor registra el motivo y queda en Equilibrado. Conserva la preferencia para el próximo arranque del servicio. Si la protección térmica o eléctrica se activa durante el uso, restaura los valores originales y guarda Equilibrado.
 
 ### Requisitos
 
@@ -31,7 +41,7 @@ Ejecuta los scripts desde la carpeta del repositorio. Si tenías un monitor manu
 - La GUI requiere Tkinter (paquete `python3-tk` en Debian y MX Linux). Las operaciones de administrador desde la GUI usan `pkexec` y un agente de Polkit.
 - Si vienes de la versión anterior al sistema de perfiles, consulta la [guía de migración](docs/MIGRACION.md).
 
-Para una instalación manual puedes usar `sudo ./install.sh --sin-servicio`. En ese caso `sudo luo-max perfil alto` mantiene el monitor en la terminal hasta Ctrl+C o hasta volver a Equilibrado. Los comandos anteriores `apply`, `restore` y `daemon` siguen disponibles.
+Para una instalación manual puedes usar `sudo ./install.sh --sin-servicio`. En ese caso `sudo luo-max perfil alto` mantiene el monitor en la terminal hasta Ctrl+C o hasta volver a Equilibrado. El arranque automático requiere instalar el servicio. Puedes iniciar el monitor a mano con `sudo luo-max daemon` para recuperar el perfil guardado.
 
 ## Perfiles
 

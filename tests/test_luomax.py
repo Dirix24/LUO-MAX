@@ -394,6 +394,52 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.boost.read_text().strip(), "0")
         self.assertFalse(self.controller.journal.exists())
 
+    def test_reboot_reapplies_maximum_and_honors_balanced_selection(self):
+        stop, thread = self.start_monitor()
+        with patch.object(self.hw, "nvidia_plan", return_value={}):
+            self.controller.apply("maximo", nvidia_factory=True)
+        stop.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.boost.read_text().strip(), "0")
+        self.controller.restore(offline=True, keep_profile=True)
+
+        self.put("proc/sys/kernel/random/boot_id", "second-boot")
+        self.controller = Controller(self.hw, self.controller.state)
+        with patch.object(self.hw, "nvidia_plan", return_value={}) as nvidia_plan:
+            stop, thread = self.start_monitor()
+            nvidia_plan.assert_called_once_with()
+            self.assertEqual(self.boost.read_text().strip(), "1")
+        self.controller.apply("equilibrado")
+        stop.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+        self.put("proc/sys/kernel/random/boot_id", "third-boot")
+        self.start_monitor()
+        self.assertEqual(self.gov.read_text().strip(), "powersave")
+        self.assertEqual(self.boost.read_text().strip(), "0")
+        self.assertFalse(self.controller.journal.exists())
+
+    def test_saved_maximum_respects_boot_preflight_and_runtime_protection(self):
+        self.controller.prepare()
+        self.controller.save_profile("maximo")
+        self.temp.write_text("90000")
+        stop, thread = self.start_monitor()
+        self.assertEqual(self.boost.read_text().strip(), "0")
+        self.assertEqual(self.controller.saved_profile(), ("maximo", False))
+        stop.set()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+        self.temp.write_text("41000")
+        self.start_monitor()
+        self.assertEqual(self.boost.read_text().strip(), "1")
+        self.temp.write_text("90000")
+        self.assertFalse(self.controller.guard(self.report.append))
+        self.assertEqual(self.controller.saved_profile(), ("equilibrado", False))
+        self.assertEqual(self.boost.read_text().strip(), "0")
+
     def test_legacy_backup_untouched(self):
         self.controller.prepare()
         legacy = self.controller.state / "backup.json"

@@ -9,7 +9,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .hardware import setting_component
+from .hardware import PROFILES, setting_component
 
 
 
@@ -22,6 +22,7 @@ class Controller:
         self.hardware = hardware
         self.state = state
         self.journal = state / "session.json"
+        self.preference = state / "profile.json"
 
     def prepare(self):
         self.state.mkdir(mode=0o700, exist_ok=True)
@@ -59,16 +60,36 @@ class Controller:
             os.close(descriptor)
 
     def save(self, record):
+        self.write_state(self.journal, record)
+
+    def write_state(self, destination, record):
         with tempfile.NamedTemporaryFile(mode="w", dir=self.state, delete=False) as output:
             temporary = Path(output.name)
             try:
                 json.dump(record, output, indent=2)
                 output.flush()
                 os.fsync(output.fileno())
-                os.replace(temporary, self.journal)
+                os.replace(temporary, destination)
                 self.sync_directory()
             finally:
                 temporary.unlink(missing_ok=True)
+
+    def saved_profile(self):
+        try:
+            descriptor = os.open(self.preference, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return "equilibrado", False
+        with os.fdopen(descriptor) as source:
+            selection = json.load(source)
+        profile = selection["profile"]
+        nvidia_factory = selection["nvidia_factory"]
+        if (profile not in PROFILES or not isinstance(nvidia_factory, bool)
+                or (nvidia_factory and profile != "maximo")):
+            raise RuntimeError(f"Perfil guardado inválido en {self.preference}.")
+        return profile, nvidia_factory
+
+    def save_profile(self, profile, nvidia_factory=False):
+        self.write_state(self.preference, {"profile": profile, "nvidia_factory": nvidia_factory})
 
     def load(self):
         legacy = self.state / "backup.json"
@@ -117,57 +138,65 @@ class Controller:
         self.sync_directory()
         return [entry["path"] for entry in restored]
 
-    def restore(self, offline=False):
+    def restore(self, offline=False, keep_profile=False):
         with self.transaction():
             if offline and self.monitor_running():
                 raise RuntimeError("Detén el monitor LUO-MAX antes de continuar.")
-            return self.restore_locked()
+            restored = self.restore_locked()
+            if not keep_profile:
+                self.save_profile("equilibrado")
+            return restored
 
     def apply(self, profile, nvidia_factory=False):
         if profile == "equilibrado":
             return self.restore()
         with self.transaction():
-            if not self.monitor_running():
-                raise MonitorRequired("Inicia primero el monitor LUO-MAX.")
-            existing = self.load()
-            if existing:
-                self.restore_locked()
-            changes, devices = self.hardware.plan(profile, nvidia_factory=nvidia_factory)
-            sensors = self.hardware.sensors(devices, changes)
-            expected_power = self.hardware.power() if profile in {"extremo", "maximo"} else None
+            return self.apply_locked(profile, nvidia_factory, remember=True)
+
+    def apply_locked(self, profile, nvidia_factory, remember=False):
+        if not self.monitor_running():
+            raise MonitorRequired("Inicia primero el monitor LUO-MAX.")
+        existing = self.load()
+        if existing:
+            self.restore_locked()
+        changes, devices = self.hardware.plan(profile, nvidia_factory=nvidia_factory)
+        sensors = self.hardware.sensors(devices, changes)
+        expected_power = self.hardware.power() if profile in {"extremo", "maximo"} else None
+        self.hardware.check(sensors, expected_power)
+        settings = {}
+        for path, target in changes.items():
+            path = self.hardware.setting_path(path)
+            settings[path] = {"path": str(path), "original": self.hardware.read_setting(path), "target": target}
+            if path.name == "scaling_governor":
+                preference = path.with_name("energy_performance_preference")
+                if preference.exists():
+                    settings[preference] = {
+                        "path": str(preference), "original": preference.read_text().strip(), "target": None
+                    }
+        record = {"boot_id": self.boot_id(), "profile": profile,
+                  "sensors": [str(path) for path in sensors], "expected_power": expected_power,
+                  "settings": list(settings.values())}
+        try:
+            self.save(record)
+            for path, entry in settings.items():
+                if entry["target"] is not None:
+                    self.set_value(path, entry["target"])
             self.hardware.check(sensors, expected_power)
-            settings = {}
-            for path, target in changes.items():
-                path = self.hardware.setting_path(path)
-                settings[path] = {"path": str(path), "original": self.hardware.read_setting(path), "target": target}
-                if path.name == "scaling_governor":
-                    preference = path.with_name("energy_performance_preference")
-                    if preference.exists():
-                        settings[preference] = {
-                            "path": str(preference), "original": preference.read_text().strip(), "target": None
-                        }
-            record = {"boot_id": self.boot_id(), "profile": profile,
-                      "sensors": [str(path) for path in sensors], "expected_power": expected_power,
-                      "settings": list(settings.values())}
+            for path, entry in settings.items():
+                entry["observed"] = self.hardware.read_setting(path)
+                if entry["target"] is not None and entry["target"] != entry["observed"]:
+                    raise RuntimeError(f"{path}: el valor aplicado cambió durante la operación.")
+            self.save(record)
+            if remember:
+                self.save_profile(profile, nvidia_factory)
+        except (OSError, RuntimeError) as error:
             try:
-                self.save(record)
-                for path, entry in settings.items():
-                    if entry["target"] is not None:
-                        self.set_value(path, entry["target"])
-                self.hardware.check(sensors, expected_power)
-                for path, entry in settings.items():
-                    entry["observed"] = self.hardware.read_setting(path)
-                    if entry["target"] is not None and entry["target"] != entry["observed"]:
-                        raise RuntimeError(f"{path}: el valor aplicado cambió durante la operación.")
-                self.save(record)
-            except (OSError, RuntimeError) as error:
-                try:
-                    self.restore_locked()
-                except (OSError, RuntimeError) as rollback:
-                    raise RuntimeError(f"Aplicación fallida: {error}\n{rollback}") from error
-                raise RuntimeError(f"Aplicación fallida y revertida: {error}") from error
-            return [entry["path"] for entry in settings.values()
-                    if entry["original"] != entry["observed"]]
+                self.restore_locked()
+            except (OSError, RuntimeError) as rollback:
+                raise RuntimeError(f"Aplicación fallida: {error}\n{rollback}") from error
+            raise RuntimeError(f"Aplicación fallida y revertida: {error}") from error
+        return [entry["path"] for entry in settings.values()
+                if entry["original"] != entry["observed"]]
 
     def guard(self, report):
         with self.transaction():
@@ -179,6 +208,7 @@ class Controller:
             except (OSError, RuntimeError) as error:
                 report(f"Protección térmica o eléctrica: {error}")
                 self.restore_locked()
+                self.save_profile("equilibrado")
                 report("Valores originales verificados. El perfil requiere reactivación manual.")
                 return False
             return True
@@ -216,16 +246,27 @@ class Controller:
                 except BlockingIOError as error:
                     raise RuntimeError("Ya existe un monitor activo.") from error
                 self.recover_at_start(report)
+                selected = profile
+                if selected is None:
+                    try:
+                        selected, nvidia_factory = self.saved_profile()
+                        if selected != "equilibrado":
+                            self.apply_locked(selected, nvidia_factory)
+                    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                        if self.journal.exists():
+                            raise
+                        report(f"No se pudo activar el perfil guardado: {error}")
+                        selected = "equilibrado"
             try:
-                if ready_file is not None:
-                    ready_file.touch(mode=0o600)
                 if profile is None:
-                    report("Monitor activo. En espera de selección manual.")
+                    report(f"Monitor activo. Perfil inicial: {selected}.")
                 else:
                     changed = self.apply(profile, nvidia_factory=nvidia_factory)
                     report(f"Perfil {profile}: {len(changed)} ajustes modificados. Ctrl+C para restaurar y salir.")
                     for path in changed:
                         report(f"  [{setting_component(Path(path))}] {path}")
+                if ready_file is not None:
+                    ready_file.touch(mode=0o600)
                 while not stop.wait(2):
                     if stop_file is not None and stop_file.exists():
                         break

@@ -25,6 +25,7 @@ def confirm(root, profile):
     maximum = profile == "maximo"
     title = "⚠ ATENCIÓN: PERFIL MÁXIMO" if maximum else "Confirmar perfil Extremo"
     body = MAX_WARNING.split("\n\n", 1)[1] if maximum else POWER_WARNING
+    body += "\n\nEl servicio volverá a aplicar este perfil en futuros arranques."
     tk.Label(dialog, text=title, bg=RED if maximum else BACKGROUND, fg=TEXT,
              font=("TkDefaultFont", 15, "bold"), padx=24, pady=14, anchor="w").pack(fill="x")
     tk.Label(dialog, text=body, bg=PANEL, fg=TEXT, wraplength=505,

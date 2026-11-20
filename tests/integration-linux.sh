@@ -82,10 +82,22 @@ test "$(cat "$governor")" = powersave
 ./install.sh --sysv
 /etc/init.d/luo-max status
 compgen -G '/etc/rc2.d/S*luo-max' >/dev/null
+/usr/local/bin/luo-max perfil maximo --confirm-risks
+test "$(cat "$boost")" = 1
+/etc/init.d/luo-max stop
+test "$(cat "$boost")" = 0
+/etc/init.d/luo-max start
+test "$(cat "$boost")" = 1
+/usr/local/bin/luo-max perfil equilibrado
+/etc/init.d/luo-max stop
+/etc/init.d/luo-max start
+test "$(cat "$governor")" = powersave
+test "$(cat "$boost")" = 0
 /usr/local/bin/luo-max perfil alto
 test "$(cat "$governor")" = performance
 ./uninstall.sh
 test "$(cat "$governor")" = powersave
+test ! -e /var/lib/luo-max/profile.json
 test ! -e /etc/init.d/luo-max
 if compgen -G '/etc/rc2.d/*luo-max' >/dev/null; then exit 1; fi
 ./uninstall.sh

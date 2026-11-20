@@ -26,7 +26,7 @@ def main(argv=None):
                              help="Con Máximo, autorizar el límite de potencia de fábrica de NVIDIA")
     commands.add_parser("version", help="Mostrar la versión de LUO-MAX")
     restore = commands.add_parser("restore", help="Recuperar y verificar los valores originales")
-    restore.add_argument("--offline", action="store_true", help="Exigir que el monitor esté detenido")
+    restore.add_argument("--offline", action="store_true", help="Restaurar con el monitor detenido y conservar el perfil guardado")
     daemon = commands.add_parser("daemon")
     daemon.add_argument("--sysv", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("gui")
@@ -78,6 +78,7 @@ def main(argv=None):
             return 0
         if args.command in {"apply", "perfil"} and args.profile in {"extremo", "maximo"}:
             print(MAX_WARNING if args.profile == "maximo" else POWER_WARNING, file=sys.stderr)
+            print("El servicio volverá a aplicar este perfil en futuros arranques.", file=sys.stderr)
             if nvidia:
                 print("NVIDIA: se autoriza subir la potencia hasta el límite de fábrica si está reducida.",
                       file=sys.stderr)
@@ -91,7 +92,8 @@ def main(argv=None):
                               stop_file=runtime / "stop" if args.sysv else None,
                               ready_file=runtime / "ready" if args.sysv else None)
         elif args.command == "restore" or args.profile == "equilibrado":
-            restored = controller.restore(offline=getattr(args, "offline", False))
+            offline = getattr(args, "offline", False)
+            restored = controller.restore(offline=offline, keep_profile=offline)
             print(f"Restauración verificada ({len(restored)} parámetros)." if restored
                   else "No hay cambios de LUO-MAX pendientes de restaurar.")
         else:
