@@ -44,22 +44,34 @@ Para una instalación manual puedes usar `sudo ./install.sh --sin-servicio`. En 
 | **Extremo** | `sudo luo-max perfil extremo --confirm-risks` | Añade preferencia energética de rendimiento donde el controlador la exponga. Comprueba sensores y alimentación. |
 | **Máximo** | `sudo luo-max perfil maximo --confirm-risks` | Habilita el boost de fábrica cuando esté disponible y puede seleccionar el modo `high` de AMDGPU con sensores asociados. Requiere confirmación y comprueba sensores y alimentación. |
 
-Consulta los cambios con `luo-max perfil extremo --dry-run`. El comando indica el valor actual y el propuesto, o «sin cambio» si coinciden. Después de aplicar, `luo-max status` muestra también el mínimo de la GPU, el planificador de disco y `swappiness`.
+Consulta los cambios con `luo-max perfil extremo --dry-run`. El comando agrupa los ajustes por componente e indica el valor actual, el propuesto o «sin cambio» si coinciden. Si un componente queda sin ajustes candidatos, la simulación también lo indica. Después de aplicar, `luo-max status` muestra también el mínimo de la GPU, el planificador de disco y `swappiness`.
 
 Extremo y Máximo pueden ajustar cuatro tipos de componentes:
 
-- **CPU**. Governor y preferencias de energía cuando el controlador los admite. Máximo puede habilitar el boost de fábrica, incluidos los controles por política cuando existen. [Documentación de CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html)
-- **GPU**. AMDGPU puede usar los modos de su controlador. Intel i915 puede elevar el mínimo hasta RP1 si hay sensor dedicado. En la Intel HD 4400 Haswell ULT con identificador PCI `8086:0a16`, LUO-MAX puede usar el sensor térmico compartido del paquete si identifica uno solo. Para esta GPU adapta el mínimo con pasos de 50 MHz dentro del tope vigente. Intel Xe usa los niveles de frecuencia eficiente o alcanzable publicados por cada GT, sin fijar el reloj al tope. En Panfrost, Panthor, Lima y MSM puede seleccionar `performance` si el controlador expone el governor y un sensor propio. Una GPU sin telemetría compatible queda fuera del ajuste. NVIDIA se inventaría incluso cuando hay PCI pero falta DRM. Sus relojes y potencia requieren una interfaz que permita comprobar y restaurar la política previa. [AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html) · [Coretemp](https://docs.kernel.org/hwmon/coretemp.html) · [Intel Xe](https://docs.kernel.org/gpu/xe/xe_gt_freq.html)
+- **CPU**. Governor y preferencias de energía cuando el controlador los admite. Máximo puede habilitar el boost de fábrica, incluidos los controles por política cuando existen, y seleccionar la preferencia EPB de mayor rendimiento en Intel compatible. [CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html) · [Intel EPB](https://docs.kernel.org/admin-guide/pm/intel_epb.html)
+- **GPU**. AMDGPU puede usar los modos de su controlador. Intel i915 puede elevar el mínimo hasta RP1 si hay sensor dedicado. En la Intel HD 4400 Haswell ULT con identificador PCI `8086:0a16`, LUO-MAX puede usar el sensor térmico compartido del paquete si identifica uno solo. Para esta GPU adapta el mínimo con pasos de 50 MHz dentro del tope vigente. Intel Xe usa los niveles de frecuencia eficiente o alcanzable publicados por cada GT, sin fijar el reloj al tope. En Panfrost, Panthor, Lima y MSM puede seleccionar `performance` si el controlador expone el governor y un sensor propio. Una GPU sin telemetría compatible queda fuera del ajuste. NVIDIA aparece en el inventario desde PCI aunque falte DRM. Las GPU NVIDIA compatibles pueden optar al límite de potencia de fábrica con el comando indicado más abajo. [AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html) · [Coretemp](https://docs.kernel.org/hwmon/coretemp.html) · [Intel Xe](https://docs.kernel.org/gpu/xe/xe_gt_freq.html)
 - **RAM**. Puede reducir `vm.swappiness` a 40 con al menos 2 GiB disponibles y swap en disco. Conserva valores ya inferiores y omite zram y zswap activos. [Parámetros de memoria del kernel](https://docs.kernel.org/admin-guide/sysctl/vm.html#swappiness)
 - **Disco**. Puede seleccionar `mq-deadline` en discos SATA internos o `none` en NVMe PCIe interno si el kernel lo ofrece. Conserva la política de discos extraíbles y unidades ópticas. [Planificadores de E/S del kernel](https://docs.kernel.org/block/switching-sched.html)
 
 Las diferencias de rendimiento dependen del equipo y de la carga. Si un valor ya coincide con el perfil, LUO-MAX lo conserva.
 
+### NVIDIA con el controlador del fabricante
+
+Si tienes `nvidia-smi` en `/usr/bin/nvidia-smi`, puedes consultar y autorizar el ajuste con:
+
+```sh
+luo-max perfil maximo --nvidia-fabrica --dry-run
+sudo luo-max perfil maximo --nvidia-fabrica --confirm-risks
+sudo luo-max perfil equilibrado
+```
+
+LUO-MAX identifica cada GPU por UUID. Si su límite actual es inferior al valor de fábrica y el controlador expone sus límites y la temperatura, puede subirlo hasta el valor de fábrica. Conserva los límites que ya coinciden y omite los superiores o desconocidos. Esto puede aumentar el consumo y la temperatura. El monitor usa la lectura de NVIDIA para revertir el ajuste si alcanza 80 °C o pierde la telemetría. [Referencia de NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/)
+
 ### Protección térmica
 
 ![Confirmación del perfil Máximo en la interfaz](docs/capturas/maximo.png)
 
-El perfil Máximo puede aumentar la temperatura, el consumo y el ruido, reducir la autonomía y provocar inestabilidad o apagados de protección. Usa refrigeración adecuada y vigila la temperatura de CPU y GPU. LUO-MAX modifica políticas del controlador y opciones de boost de fábrica. No modifica voltajes, límites de potencia ni frecuencias del fabricante, ni realiza overclock físico. Tampoco borra temporales ni vacía cachés.
+El perfil Máximo puede aumentar la temperatura, el consumo y el ruido, reducir la autonomía y provocar inestabilidad o apagados de protección. Usa refrigeración adecuada y vigila la temperatura de CPU y GPU. LUO-MAX modifica políticas del controlador y opciones de boost de fábrica. Mantiene los voltajes y los topes del fabricante. NVIDIA solo puede recuperar su límite de potencia de fábrica con autorización específica. No realiza overclock físico. Tampoco borra temporales ni vacía cachés.
 
 El monitor verifica cada dos segundos la telemetría de CPU y de las GPU que modifica. Restaura la sesión si desaparece una lectura, si alcanza el umbral preventivo de 80 °C o un umbral inferior calculado a partir del límite crítico del sensor, o si cambia la alimentación verificada de Extremo o Máximo. En portátiles, esos dos perfiles requieren corriente confirmada. Si un equipo no expone batería ni fuentes de alimentación en sysfs, el monitor lo trata como equipo sin batería. Tras una protección, el perfil requiere reactivación manual.
 
@@ -82,7 +94,7 @@ python3 -m unittest discover -s tests -v
 bash tests/integration-linux.sh   # requiere bubblewrap y espacios de nombres de usuario
 ```
 
-GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes comprobar un reinicio completo con el servicio instalado, ejecutar con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. En MX Linux, el usuario comprobó Alto y la restauración sobre un Intel i7-4500U que ya usaba el governor `performance`. Las escrituras de i915, Xe, GPU ARM, RAM y disco y su restauración se probaron con atributos simulados. En el i7-4500U se comprobó de solo lectura la propuesta de frecuencia mínima de su iGPU. El proyecto se entrega como candidato a revisión humana.
+GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes comprobar un reinicio completo con el servicio instalado, ejecutar con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. En MX Linux, el usuario comprobó Alto y la restauración sobre un Intel i7-4500U que ya usaba el governor `performance`. Las escrituras de i915, Xe, GPU ARM, RAM y disco y su restauración se probaron con atributos simulados. El control de NVIDIA se probó con respuestas simuladas de nvidia-smi. En el i7-4500U se comprobó de solo lectura la propuesta de frecuencia mínima de su iGPU. El proyecto se entrega como candidato a revisión humana.
 
 ## Licencia y desarrollo con IA
 

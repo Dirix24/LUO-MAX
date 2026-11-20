@@ -9,7 +9,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .hardware import read_setting
+from .hardware import setting_component
+
 
 
 class MonitorRequired(RuntimeError):
@@ -84,9 +85,9 @@ class Controller:
         return record
 
     def set_value(self, path, value):
-        if read_setting(path) != value:
-            path.write_text(value + "\n")
-        actual = read_setting(path)
+        if self.hardware.read_setting(path) != value:
+            self.hardware.write_setting(path, value)
+        actual = self.hardware.read_setting(path)
         if actual != value:
             raise RuntimeError(f"{path}: se esperaba {value!r}, el controlador devolvió {actual!r}.")
 
@@ -106,9 +107,9 @@ class Controller:
         for entry in restored:
             path = Path(entry["path"])
             try:
-                if read_setting(path) != entry["original"]:
+                if self.hardware.read_setting(path) != entry["original"]:
                     errors.append(f"{path}: el valor original cambió durante la restauración.")
-            except OSError as error:
+            except (OSError, RuntimeError) as error:
                 errors.append(f"{path}: {error}")
         if errors:
             raise RuntimeError("Restauración incompleta. Se conserva el diario.\n" + "\n".join(errors))
@@ -122,7 +123,7 @@ class Controller:
                 raise RuntimeError("Detén el monitor LUO-MAX antes de continuar.")
             return self.restore_locked()
 
-    def apply(self, profile):
+    def apply(self, profile, nvidia_factory=False):
         if profile == "equilibrado":
             return self.restore()
         with self.transaction():
@@ -131,14 +132,14 @@ class Controller:
             existing = self.load()
             if existing:
                 self.restore_locked()
-            changes, devices = self.hardware.plan(profile)
-            sensors = self.hardware.sensors(devices)
+            changes, devices = self.hardware.plan(profile, nvidia_factory=nvidia_factory)
+            sensors = self.hardware.sensors(devices, changes)
             expected_power = self.hardware.power() if profile in {"extremo", "maximo"} else None
             self.hardware.check(sensors, expected_power)
             settings = {}
             for path, target in changes.items():
-                path = path.resolve(strict=True)
-                settings[path] = {"path": str(path), "original": read_setting(path), "target": target}
+                path = self.hardware.setting_path(path)
+                settings[path] = {"path": str(path), "original": self.hardware.read_setting(path), "target": target}
                 if path.name == "scaling_governor":
                     preference = path.with_name("energy_performance_preference")
                     if preference.exists():
@@ -155,7 +156,7 @@ class Controller:
                         self.set_value(path, entry["target"])
                 self.hardware.check(sensors, expected_power)
                 for path, entry in settings.items():
-                    entry["observed"] = read_setting(path)
+                    entry["observed"] = self.hardware.read_setting(path)
                     if entry["target"] is not None and entry["target"] != entry["observed"]:
                         raise RuntimeError(f"{path}: el valor aplicado cambió durante la operación.")
                 self.save(record)
@@ -202,7 +203,7 @@ class Controller:
         report(f"Diario de otro arranque archivado en {archive_path}.")
         self.restore_locked()
 
-    def daemon(self, report, stop=None, profile=None, stop_file=None, ready_file=None):
+    def daemon(self, report, stop=None, profile=None, stop_file=None, ready_file=None, nvidia_factory=False):
         if stop is None:
             stop = threading.Event()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -221,10 +222,10 @@ class Controller:
                 if profile is None:
                     report("Monitor activo. En espera de selección manual.")
                 else:
-                    changed = self.apply(profile)
+                    changed = self.apply(profile, nvidia_factory=nvidia_factory)
                     report(f"Perfil {profile}: {len(changed)} ajustes modificados. Ctrl+C para restaurar y salir.")
                     for path in changed:
-                        report(f"  {path}")
+                        report(f"  [{setting_component(Path(path))}] {path}")
                 while not stop.wait(2):
                     if stop_file is not None and stop_file.exists():
                         break

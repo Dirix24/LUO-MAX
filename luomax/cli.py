@@ -7,7 +7,7 @@ import sys
 
 from . import __version__
 from .controller import Controller, MonitorRequired
-from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES, read_setting
+from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES, setting_component
 
 
 def main(argv=None):
@@ -22,6 +22,8 @@ def main(argv=None):
         command.add_argument("profile", choices=PROFILES, default="equilibrado", nargs="?")
         command.add_argument("--confirm-risks", action="store_true")
         command.add_argument("--dry-run", action="store_true", help="Consultar los ajustes candidatos sin escribir")
+        command.add_argument("--nvidia-fabrica", action="store_true",
+                             help="Con Máximo, autorizar el límite de potencia de fábrica de NVIDIA")
     commands.add_parser("version", help="Mostrar la versión de LUO-MAX")
     restore = commands.add_parser("restore", help="Recuperar y verificar los valores originales")
     restore.add_argument("--offline", action="store_true", help="Exigir que el monitor esté detenido")
@@ -35,6 +37,10 @@ def main(argv=None):
     hardware = Hardware()
     controller = Controller(hardware)
     try:
+        nvidia = getattr(args, "nvidia_fabrica", False)
+        if nvidia and args.profile != "maximo":
+            raise RuntimeError("--nvidia-fabrica requiere el perfil maximo.")
+        options = {"nvidia_factory": True} if nvidia else {}
         if args.command == "status":
             data = hardware.status()
             if args.json:
@@ -54,17 +60,27 @@ def main(argv=None):
             if args.profile == "equilibrado":
                 print("Equilibrado restauraría la sesión pendiente, si existe.")
                 return 0
-            settings, devices = hardware.plan(args.profile)
+            settings, devices = hardware.plan(args.profile, **options)
             expected_power = hardware.power() if args.profile in {"extremo", "maximo"} else None
-            hardware.check(hardware.sensors(devices), expected_power)
+            hardware.check(hardware.sensors(devices, settings), expected_power)
             print("Ajustes candidatos según el estado actual:")
+            by_component = {}
             for path, target in settings.items():
-                current = read_setting(path)
-                state = "sin cambio" if current == target else f"{current} → {target}"
-                print(f"  {path}: {state}")
+                current = hardware.read_setting(path)
+                state = f"sin cambio ({current})" if current == target else f"{current} → {target}"
+                by_component.setdefault(setting_component(path), []).append(f"  {path}: {state}")
+            for component, details in by_component.items():
+                print(component)
+                print("\n".join(details))
+            for component in ("CPU", "GPU", "RAM", "Disco"):
+                if component not in by_component and (component != "GPU" or "GPU NVIDIA" not in by_component):
+                    print(f"{component}: sin ajuste candidato para este perfil.")
             return 0
         if args.command in {"apply", "perfil"} and args.profile in {"extremo", "maximo"}:
             print(MAX_WARNING if args.profile == "maximo" else POWER_WARNING, file=sys.stderr)
+            if nvidia:
+                print("NVIDIA: se autoriza subir la potencia hasta el límite de fábrica si está reducida.",
+                      file=sys.stderr)
             if not args.confirm_risks:
                 raise RuntimeError("Confirma la activación explícita con --confirm-risks.")
         if os.geteuid() != 0:
@@ -80,15 +96,15 @@ def main(argv=None):
                   else "No hay cambios de LUO-MAX pendientes de restaurar.")
         else:
             try:
-                changed = controller.apply(args.profile)
+                changed = controller.apply(args.profile, **options)
             except MonitorRequired:
                 if args.command != "perfil":
                     raise
-                controller.daemon(lambda message: print(message, flush=True), profile=args.profile)
+                controller.daemon(lambda message: print(message, flush=True), profile=args.profile, **options)
                 return 0
             print(f"Perfil {args.profile} supervisado. Parámetros modificados: {len(changed)}.")
             for path in changed:
-                print(f"  {path}")
+                print(f"  [{setting_component(Path(path))}] {path}")
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, ImportError) as error:
         print(f"LUO-MAX: {error}", file=sys.stderr)
         return 1

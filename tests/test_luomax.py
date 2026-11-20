@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 import subprocess
@@ -99,6 +101,19 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.boost.read_text().strip(), "0")
         self.assertFalse(self.controller.journal.exists())
 
+    def test_maximum_intel_energy_bias_restores_originals(self):
+        first = self.put("sys/devices/system/cpu/cpu0/power/energy_perf_bias", "6")
+        second = self.put("sys/devices/system/cpu/cpu1/power/energy_perf_bias", "6")
+        self.start_monitor()
+        self.controller.apply("extremo")
+        self.assertEqual(first.read_text().strip(), "6")
+        self.controller.apply("maximo")
+        self.assertEqual(first.read_text().strip(), "0")
+        self.assertEqual(second.read_text().strip(), "0")
+        self.controller.restore()
+        self.assertEqual(first.read_text().strip(), "6")
+        self.assertEqual(second.read_text().strip(), "6")
+
     def test_maximum_amd_gpu_covered_and_restored(self):
         gpu = self.put("sys/class/drm/card0/device/power_dpm_force_performance_level", "auto")
         (gpu.parent / "driver").symlink_to("/sys/bus/pci/drivers/amdgpu")
@@ -179,6 +194,46 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.hw.storage_policy(), {self.hw.sysfs / "block/nvme0n1/queue/scheduler": "none"})
         removable.write_text("1")
         self.assertEqual(self.hw.storage_policy(), {})
+
+    def test_nvidia_factory_cap_is_verified_and_restored_when_hot(self):
+        uuid = "GPU-12345678-1234-1234-1234-123456789abc"
+        current = "100"
+        temperature = "47"
+        writes = []
+
+        def nvidia(*args):
+            nonlocal current
+            if args[0].startswith("--query-gpu=uuid,"):
+                return f"{uuid}, {current}, 120.00, 50, 150, {temperature}\n"
+            self.assertEqual(args[:2], ("-i", uuid))
+            if args[2] == "--power-limit":
+                current = args[3]
+                writes.append(current)
+                return ""
+            if args[2] == "--query-gpu=power.limit":
+                return current + ".00"
+            if args[2] == "--query-gpu=temperature.gpu":
+                return temperature
+            self.fail(str(args))
+
+        self.start_monitor()
+        with patch("luomax.hardware.nvidia_command", side_effect=nvidia) as command:
+            self.controller.apply("maximo")
+            command.assert_not_called()
+            self.controller.apply("maximo", nvidia_factory=True)
+            self.assertEqual(current, "120")
+            temperature = "83"
+            self.controller.guard(self.report.append)
+        self.assertEqual(writes, ["120", "100"])
+        self.assertFalse(self.controller.journal.exists())
+
+    def test_nvidia_plan_skips_unknown_caps_and_above_factory(self):
+        uuid = "GPU-12345678-1234-1234-1234-123456789abc"
+        for line in (f"{uuid}, 130, 120, 50, 150, 45", f"{uuid}, 100, N/A, 50, 150, 45",
+                     f"{uuid}, 100, 120, 50, 150, N/A"):
+            with self.subTest(line=line), patch("luomax.hardware.nvidia_command", return_value=line):
+                with self.assertRaisesRegex(RuntimeError, "NVIDIA no expone"):
+                    self.hw.nvidia_plan()
 
     def test_haswell_integrated_gpu_uses_package_sensor(self):
         card = self.root / "sys/class/drm/card0"
@@ -383,11 +438,24 @@ class Entrypoints(unittest.TestCase):
         with patch("luomax.cli.Hardware", return_value=plan), patch("luomax.cli.Controller") as controller:
             with patch.object(plan, "plan", return_value=({Path("/test"): "performance"}, [])):
                 with patch.object(plan, "sensors", return_value=[Path("/sensor")]):
-                    with patch.object(plan, "check"), patch("luomax.cli.read_setting", return_value="powersave"), \
+                    with patch.object(plan, "check"), patch.object(plan, "read_setting", return_value="powersave"), \
                             patch("luomax.cli.os.geteuid", return_value=1000):
-                        self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
+                        preview = StringIO()
+                        with redirect_stdout(preview):
+                            self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
+                        self.assertIn("powersave → performance", preview.getvalue())
+                        self.assertIn("GPU: sin ajuste candidato", preview.getvalue())
             controller.return_value.apply.assert_not_called()
             controller.return_value.restore.assert_not_called()
+
+    def test_nvidia_requires_maximum_and_confirmation(self):
+        with patch("luomax.cli.Controller.apply") as apply, patch("luomax.cli.os.geteuid", return_value=0):
+            self.assertEqual(main(["perfil", "extremo", "--nvidia-fabrica", "--confirm-risks"]), 1)
+            self.assertEqual(main(["perfil", "maximo", "--nvidia-fabrica"]), 1)
+            apply.assert_not_called()
+            apply.return_value = []
+            self.assertEqual(main(["perfil", "maximo", "--nvidia-fabrica", "--confirm-risks"]), 0)
+            apply.assert_called_once_with("maximo", nvidia_factory=True)
 
     def test_version_is_available_without_privileges(self):
         project = Path(__file__).resolve().parents[1]
