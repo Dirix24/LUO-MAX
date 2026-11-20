@@ -103,8 +103,9 @@ class Profiles(unittest.TestCase):
         gpu = self.put("sys/class/drm/card0/device/power_dpm_force_performance_level", "auto")
         (gpu.parent / "driver").symlink_to("/sys/bus/pci/drivers/amdgpu")
         self.start_monitor()
-        with self.assertRaisesRegex(RuntimeError, "Sin sensores para la GPU"):
-            self.controller.apply("maximo")
+        self.controller.apply("maximo")
+        self.assertEqual(gpu.read_text().strip(), "auto")
+        self.assertEqual(self.boost.read_text().strip(), "1")
         gpu_temp = self.put("sys/class/drm/card0/device/hwmon/hwmon4/temp1_input", "47000")
         self.controller.apply("maximo")
         self.assertEqual(gpu.read_text().strip(), "high")
@@ -142,6 +143,42 @@ class Profiles(unittest.TestCase):
         self.assertEqual(observed, ["performance"])
         self.assertEqual(self.gov.read_text().strip(), "powersave")
         self.assertFalse(self.controller.journal.exists())
+
+    def test_mixed_graphics_apply_only_reversible_policies(self):
+        limits = "sys/class/drm/card0/device/tile0/gt0/freq0/"
+        intel_min = self.put(limits + "min_freq", "300")
+        self.put(limits + "max_freq", "1200")
+        self.put(limits + "rp0_freq", "1500")
+        self.put(limits + "rpa_freq", "1000")
+        self.put("sys/class/drm/card0/device/hwmon/hwmon1/temp1_input", "48000")
+        (self.root / "sys/class/drm/card0/device/driver").symlink_to("/sys/bus/pci/drivers/xe")
+        arm_gov = self.put("sys/class/drm/card1/device/devfreq/gpu/governor", "simple_ondemand")
+        self.put("sys/class/drm/card1/device/devfreq/gpu/available_governors", "simple_ondemand performance")
+        self.put("sys/class/drm/card1/device/hwmon/hwmon2/temp1_input", "43000")
+        (self.root / "sys/class/drm/card1/device/driver").symlink_to("/sys/bus/platform/drivers/panfrost")
+        self.put("sys/bus/pci/devices/0000:01:00.0/vendor", "0x10de")
+        self.put("sys/bus/pci/devices/0000:01:00.0/class", "0x030200")
+        policy_boost = self.put(self.policy + "boost", "0")
+        self.start_monitor()
+        self.controller.apply("maximo")
+        self.assertEqual(intel_min.read_text().strip(), "1000")
+        self.assertEqual(arm_gov.read_text().strip(), "performance")
+        self.assertEqual(policy_boost.read_text().strip(), "1")
+        self.assertIn("NVIDIA", self.hw.status()["gpu"])
+        self.controller.restore()
+        self.assertEqual(intel_min.read_text().strip(), "300")
+        self.assertEqual(arm_gov.read_text().strip(), "simple_ondemand")
+        self.assertEqual(policy_boost.read_text().strip(), "0")
+
+    def test_storage_selects_pcie_nvme_and_keeps_removable_drive(self):
+        directory = "sys/devices/pci0000:00/0000:00:03.0/nvme/nvme0/nvme0n1"
+        scheduler = self.put(directory + "/queue/scheduler", "none [mq-deadline]")
+        removable = self.put(directory + "/removable", "0")
+        (self.hw.sysfs / "block").mkdir()
+        (self.hw.sysfs / "block/nvme0n1").symlink_to(scheduler.parent.parent)
+        self.assertEqual(self.hw.storage_policy(), {self.hw.sysfs / "block/nvme0n1/queue/scheduler": "none"})
+        removable.write_text("1")
+        self.assertEqual(self.hw.storage_policy(), {})
 
     def test_haswell_integrated_gpu_uses_package_sensor(self):
         card = self.root / "sys/class/drm/card0"

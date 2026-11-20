@@ -108,10 +108,58 @@ class Hardware:
         target = min(ceiling, sustained)
         return {minimum: str(target)} if current < target else {}
 
+    def xe_policy(self, device, profile):
+        if profile == "alto":
+            return {}
+        changes = {}
+        for gt in sorted(device.resolve().glob("tile[0-9]*/gt[0-9]*/freq0")):
+            minimum = gt / "min_freq"
+            capability = "rpa_freq" if profile == "maximo" else "rpe_freq"
+            values = [optional(path) for path in (minimum, gt / "max_freq", gt / "rp0_freq", gt / capability)]
+            if not all(value and value.isascii() and value.isdigit() for value in values):
+                continue
+            current, ceiling, peak, preferred = map(int, values)
+            if 0 < current <= ceiling <= peak and 0 < preferred <= peak:
+                # Keep at least some room for dynamic control below the configured ceiling.
+                target = min(preferred, ceiling)
+                if current < target < ceiling:
+                    changes[minimum] = str(target)
+        return changes
+
+    def devfreq_policy(self, device, profile):
+        if profile == "alto":
+            return {}
+        changes = {}
+        for devfreq in sorted(device.resolve().glob("devfreq/*")):
+            modes = (optional(devfreq / "available_governors") or "").split()
+            current = optional(devfreq / "governor")
+            if current in modes and "performance" in modes:
+                changes[devfreq / "governor"] = "performance"
+        return changes
+
+    def gpu_policy(self, card, profile):
+        device = card / "device"
+        driver = (device / "driver").resolve().name
+        if not (self.gpu_sensors(device) or self.package_sensor(device)):
+            return {}
+        if driver == "i915":
+            return self.intel_policy(card, profile)
+        if driver == "xe":
+            return self.xe_policy(device, profile)
+        if driver in {"panfrost", "panthor", "lima", "msm"}:
+            return self.devfreq_policy(device, profile)
+        if driver == "amdgpu":
+            path = device / "power_dpm_force_performance_level"
+            current = optional(path)
+            if current in {"auto", "low", "high"} and (profile == "maximo" or current == "low"):
+                return {path: "high" if profile == "maximo" else "auto"}
+        return {}
+
     def sensors(self, gpu_devices=()):
         sensors = set()
         cpu_names = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
-        thermal_zones = cpu_names | {"x86_pkg_temp", "cpu", "soc_thermal"}
+        thermal_zones = cpu_names | {"x86_pkg_temp", "cpu", "soc_thermal", "cpu_therm",
+                                    "cpu_big", "cpu_little", "bigcore", "littlecore"}
         for hwmon in sorted(self.sysfs.glob("class/hwmon/hwmon*")):
             if optional(hwmon / "name") in cpu_names:
                 sensors.update(hwmon.resolve().glob("temp[0-9]*_input"))
@@ -156,14 +204,23 @@ class Hardware:
     def storage_policy(self):
         changes = {}
         for disk in self.sysfs.glob("block/*"):
-            if not any(re.fullmatch(r"ata[0-9]+", part) for part in disk.resolve().parts):
+            physical = disk.resolve()
+            if optional(disk / "removable") != "0" or "virtual" in physical.parts:
                 continue
-            if optional(disk / "removable") != "0" or optional(disk / "device/type") != "0":
+            if re.fullmatch(r"nvme[0-9]+n[0-9]+", disk.name) and any(
+                re.fullmatch(r"pci[0-9a-f]{4}:[0-9a-f]{2}", part) for part in physical.parts
+            ):
+                target = "none"
+            elif any(re.fullmatch(r"ata[0-9]+", part) for part in physical.parts) and (
+                optional(disk / "device/type") == "0"
+            ):
+                target = "mq-deadline"
+            else:
                 continue
             scheduler = disk / "queue/scheduler"
             modes = (optional(scheduler) or "").replace("[", "").replace("]", "").split()
-            if "mq-deadline" in modes:
-                changes[scheduler] = "mq-deadline"
+            if target in modes:
+                changes[scheduler] = target
         return changes
 
     def memory_policy(self):
@@ -196,30 +253,19 @@ class Hardware:
                 preferences = optional(policy / "energy_performance_available_preferences") or ""
                 if "performance" in preferences.split():
                     changes[policy / "energy_performance_preference"] = "performance"
+            if profile == "maximo" and optional(policy / "boost") in {"0", "1"}:
+                changes[policy / "boost"] = "1"
         if profile == "maximo":
             cpu = self.sysfs / "devices/system/cpu"
             for relative, target in (("cpufreq/boost", "1"), ("intel_pstate/no_turbo", "0")):
                 path = cpu / relative
                 if optional(path) in {"0", "1"}:
                     changes[path] = target
-        if profile in {"alto", "extremo", "maximo"}:
-            for card in self.cards():
-                device = card / "device"
-                driver = device / "driver"
-                path = device / "power_dpm_force_performance_level"
-                driver_name = driver.resolve().name
-                if driver_name == "i915":
-                    candidate = self.intel_policy(card, profile)
-                    if candidate:
-                        changes.update(candidate)
-                        gpu_devices.append(device)
-                    continue
-                current = optional(path) if driver_name == "amdgpu" else None
-                if current in {"auto", "low", "high"} and (
-                    profile == "maximo" or current == "low"
-                ):
-                    changes[path] = "high" if profile == "maximo" else "auto"
-                    gpu_devices.append(device)
+        for card in self.cards():
+            candidate = self.gpu_policy(card, profile)
+            if candidate:
+                changes.update(candidate)
+                gpu_devices.append(card / "device")
         if profile in {"extremo", "maximo"}:
             changes.update(self.storage_policy())
             changes.update(self.memory_policy())
@@ -256,7 +302,20 @@ class Hardware:
             minimum = optional(card / "gt_min_freq_mhz")
             if minimum and minimum.isascii() and minimum.isdigit():
                 detail += f", mínimo {minimum} MHz"
+            if driver_name in {"nvidia", "nouveau", "nvidia-drm"}:
+                detail += ", inventario"
+            elif not (self.gpu_sensors(device) or self.package_sensor(device)) and driver_name != "i915":
+                detail += ", sin sensor térmico compatible"
             gpu_details.append(detail)
+        drm_devices = {(card / "device").resolve() for card in self.cards()}
+        for pci in sorted(self.sysfs.glob("bus/pci/devices/*")):
+            device = pci.resolve()
+            if device in drm_devices or not (optional(device / "class") or "").startswith("0x03"):
+                continue
+            vendor = optional(device / "vendor")
+            label = vendors.get(vendor, vendor or device.name)
+            gpus.append(label)
+            gpu_details.append(f"{device.name}: {label}, sin tarjeta DRM asociada")
         disks = []
         for disk in sorted(self.sysfs.glob("block/*")):
             if "virtual" in disk.resolve().parts:
