@@ -1,5 +1,8 @@
 """Read Linux hardware interfaces and plan reversible driver settings."""
+import csv
+from decimal import Decimal
 import re
+import subprocess
 from pathlib import Path
 
 PROFILES = ("equilibrado", "alto", "extremo", "maximo")
@@ -38,10 +41,71 @@ def read_setting(path):
     return value
 
 
+NVIDIA_SMI = "/usr/bin/nvidia-smi"
+GPU_UUID = re.compile(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+NVIDIA_SETTINGS = Path("/nvidia-smi")
+
+
+def nvidia_command(*args):
+    try:
+        run = subprocess.run([NVIDIA_SMI, *args], capture_output=True, text=True, check=True, timeout=3)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"No se pudo consultar o ajustar NVIDIA mediante nvidia-smi: {error}") from error
+    return run.stdout
+
+
+def watts(value):
+    if not re.fullmatch(r"[0-9]{1,4}(?:\.[0-9]{1,3})?", value):
+        raise RuntimeError(f"Límite de potencia NVIDIA no disponible: {value!r}.")
+    return format(Decimal(value).normalize(), "f")
+
+
+def nvidia_uuid(path):
+    if len(path.parts) != 4 or path.parent.parent != NVIDIA_SETTINGS:
+        return None
+    return path.parent.name if GPU_UUID.fullmatch(path.parent.name) else None
+
+
 class Hardware:
     def __init__(self, sysfs=Path("/sys"), proc=Path("/proc")):
         self.sysfs = sysfs
         self.proc = proc
+
+    def setting_path(self, path):
+        return path if nvidia_uuid(path) else path.resolve(strict=True)
+
+    def read_setting(self, path):
+        device = nvidia_uuid(path)
+        if device and path.name == "power_limit":
+            return watts(nvidia_command("-i", device, "--query-gpu=power.limit",
+                                        "--format=csv,noheader,nounits").strip())
+        return read_setting(path)
+
+    def write_setting(self, path, value):
+        device = nvidia_uuid(path)
+        if device and path.name == "power_limit":
+            nvidia_command("-i", device, "--power-limit", watts(value))
+        else:
+            path.write_text(value + "\n")
+
+    def nvidia_plan(self):
+        output = nvidia_command("--query-gpu=uuid,power.limit,power.default_limit,power.min_limit,power.max_limit,temperature.gpu",
+                                "--format=csv,noheader,nounits")
+        changes = {}
+        for row in csv.reader(output.splitlines(), skipinitialspace=True):
+            if len(row) != 6 or not GPU_UUID.fullmatch(row[0]):
+                continue
+            uuid, current, default, minimum, maximum, temperature = row
+            try:
+                actual, factory, low, high = (Decimal(watts(value)) for value in (current, default, minimum, maximum))
+            except RuntimeError:
+                continue
+            if (0 < low <= actual <= factory <= high and re.fullmatch(r"[0-9]{1,3}", temperature)
+                    and 0 < int(temperature) <= 150):
+                changes[NVIDIA_SETTINGS / uuid / "power_limit"] = watts(default)
+        if not changes:
+            raise RuntimeError("NVIDIA no expone un límite de fábrica y temperatura compatibles, o ya supera el límite de fábrica.")
+        return changes
 
     def policies(self):
         return sorted(self.sysfs.glob("devices/system/cpu/cpufreq/policy[0-9]*"))
@@ -155,7 +219,7 @@ class Hardware:
                 return {path: "high" if profile == "maximo" else "auto"}
         return {}
 
-    def sensors(self, gpu_devices=()):
+    def sensors(self, gpu_devices=(), settings=()):
         sensors = set()
         cpu_names = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
         thermal_zones = cpu_names | {"x86_pkg_temp", "cpu", "soc_thermal", "cpu_therm",
@@ -174,6 +238,7 @@ class Hardware:
             if not gpu:
                 raise RuntimeError(f"Sin sensores para la GPU {device}.")
             sensors.update(gpu)
+        sensors.update(path.with_name("temperature") for path in settings if nvidia_uuid(path))
         return sorted(sensors)
 
     def check(self, sensors, expected_power):
@@ -184,6 +249,13 @@ class Hardware:
         if not sensors:
             raise RuntimeError("Sin supervisión térmica.")
         for path in sensors:
+            device = nvidia_uuid(path)
+            if device and path.name == "temperature":
+                sample = nvidia_command("-i", device, "--query-gpu=temperature.gpu",
+                                        "--format=csv,noheader,nounits").strip()
+                if not re.fullmatch(r"[0-9]{1,3}", sample) or not 0 < int(sample) < 80:
+                    raise RuntimeError(f"NVIDIA {device}: temperatura insegura o no disponible ({sample}).")
+                continue
             raw = optional(path)
             if not raw or not re.fullmatch(r"-?[0-9]+", raw) or not 0 < int(raw) <= 150000:
                 raise RuntimeError(f"Lectura térmica inválida o ausente: {path}.")
@@ -242,7 +314,7 @@ class Hardware:
                 return {}
         return {swappiness: "40"}
 
-    def plan(self, profile):
+    def plan(self, profile, nvidia_factory=False):
         changes = {}
         gpu_devices = []
         for policy in self.policies():
@@ -269,6 +341,8 @@ class Hardware:
         if profile in {"extremo", "maximo"}:
             changes.update(self.storage_policy())
             changes.update(self.memory_policy())
+        if profile == "maximo" and nvidia_factory:
+            changes.update(self.nvidia_plan())
         if not changes:
             raise RuntimeError("El equipo no expone ajustes compatibles con este perfil.")
         return changes, gpu_devices
