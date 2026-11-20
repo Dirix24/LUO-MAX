@@ -44,7 +44,16 @@ Para una instalación manual puedes usar `sudo ./install.sh --sin-servicio`. En 
 | **Extremo** | `sudo luo-max perfil extremo --confirm-risks` | Añade preferencia energética de rendimiento donde el controlador la exponga. Comprueba sensores y alimentación. |
 | **Máximo** | `sudo luo-max perfil maximo --confirm-risks` | Habilita el boost de fábrica cuando esté disponible y puede seleccionar el modo `high` de AMDGPU con sensores asociados. Requiere confirmación y comprueba sensores y alimentación. |
 
-Consulta los ajustes candidatos con `luo-max perfil maximo --dry-run`. La simulación consulta atributos y restricciones actuales. El conjunto real se calcula tras restaurar una sesión previa, si existe. Algunas máquinas exponen los mismos controles para más de un perfil. La GPU AMD puede usar modos reversibles de AMDGPU. En Intel i915, Extremo y Máximo pueden elevar la frecuencia mínima hasta RP1 si el controlador publica los límites y la GPU tiene telemetría térmica propia. El tope vigente se respeta. NVIDIA figura en el inventario. RAM y discos se consultan para diagnóstico. En CPU se usan [CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html), los [controles de Intel P-State](https://docs.kernel.org/admin-guide/pm/intel_pstate.html) y los atributos compatibles del controlador. Consulta los [controles térmicos y de energía de AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html).
+Consulta los cambios con `luo-max perfil extremo --dry-run`. El comando indica el valor actual y el propuesto, o «sin cambio» si coinciden. Después de aplicar, `luo-max status` muestra también el mínimo de la GPU, el planificador de disco y `swappiness`.
+
+Extremo y Máximo pueden ajustar cuatro tipos de componentes:
+
+- **CPU**. Governor y preferencias de energía cuando el controlador los admite. Máximo puede habilitar el boost de fábrica, incluidos los controles por política cuando existen. [Documentación de CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html)
+- **GPU**. AMDGPU puede usar los modos de su controlador. Intel i915 puede elevar el mínimo hasta RP1 si hay sensor dedicado. En la Intel HD 4400 Haswell ULT con identificador PCI `8086:0a16`, LUO-MAX puede usar el sensor térmico compartido del paquete si identifica uno solo. Para esta GPU adapta el mínimo con pasos de 50 MHz dentro del tope vigente. Intel Xe usa los niveles de frecuencia eficiente o alcanzable publicados por cada GT, sin fijar el reloj al tope. En Panfrost, Panthor, Lima y MSM puede seleccionar `performance` si el controlador expone el governor y un sensor propio. Una GPU sin telemetría compatible queda fuera del ajuste. NVIDIA se inventaría incluso cuando hay PCI pero falta DRM. Sus relojes y potencia requieren una interfaz que permita comprobar y restaurar la política previa. [AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html) · [Coretemp](https://docs.kernel.org/hwmon/coretemp.html) · [Intel Xe](https://docs.kernel.org/gpu/xe/xe_gt_freq.html)
+- **RAM**. Puede reducir `vm.swappiness` a 40 con al menos 2 GiB disponibles y swap en disco. Conserva valores ya inferiores y omite zram y zswap activos. [Parámetros de memoria del kernel](https://docs.kernel.org/admin-guide/sysctl/vm.html#swappiness)
+- **Disco**. Puede seleccionar `mq-deadline` en discos SATA internos o `none` en NVMe PCIe interno si el kernel lo ofrece. Conserva la política de discos extraíbles y unidades ópticas. [Planificadores de E/S del kernel](https://docs.kernel.org/block/switching-sched.html)
+
+Las diferencias de rendimiento dependen del equipo y de la carga. Si un valor ya coincide con el perfil, LUO-MAX lo conserva.
 
 ### Protección térmica
 
@@ -73,7 +82,7 @@ python3 -m unittest discover -s tests -v
 bash tests/integration-linux.sh   # requiere bubblewrap y espacios de nombres de usuario
 ```
 
-GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes comprobar un reinicio completo con el servicio instalado, ejecutar con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. En MX Linux, el usuario comprobó Alto y la restauración sobre un Intel i7-4500U que ya usaba el governor `performance`. La política i915 de esta versión se probó con atributos simulados. El proyecto se entrega como candidato a revisión humana.
+GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes comprobar un reinicio completo con el servicio instalado, ejecutar con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. En MX Linux, el usuario comprobó Alto y la restauración sobre un Intel i7-4500U que ya usaba el governor `performance`. Las escrituras de i915, Xe, GPU ARM, RAM y disco y su restauración se probaron con atributos simulados. En el i7-4500U se comprobó de solo lectura la propuesta de frecuencia mínima de su iGPU. El proyecto se entrega como candidato a revisión humana.
 
 ## Licencia y desarrollo con IA
 

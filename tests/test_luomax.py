@@ -103,8 +103,9 @@ class Profiles(unittest.TestCase):
         gpu = self.put("sys/class/drm/card0/device/power_dpm_force_performance_level", "auto")
         (gpu.parent / "driver").symlink_to("/sys/bus/pci/drivers/amdgpu")
         self.start_monitor()
-        with self.assertRaisesRegex(RuntimeError, "Sin sensores para la GPU"):
-            self.controller.apply("maximo")
+        self.controller.apply("maximo")
+        self.assertEqual(gpu.read_text().strip(), "auto")
+        self.assertEqual(self.boost.read_text().strip(), "1")
         gpu_temp = self.put("sys/class/drm/card0/device/hwmon/hwmon4/temp1_input", "47000")
         self.controller.apply("maximo")
         self.assertEqual(gpu.read_text().strip(), "high")
@@ -142,6 +143,100 @@ class Profiles(unittest.TestCase):
         self.assertEqual(observed, ["performance"])
         self.assertEqual(self.gov.read_text().strip(), "powersave")
         self.assertFalse(self.controller.journal.exists())
+
+    def test_mixed_graphics_apply_only_reversible_policies(self):
+        limits = "sys/class/drm/card0/device/tile0/gt0/freq0/"
+        intel_min = self.put(limits + "min_freq", "300")
+        self.put(limits + "max_freq", "1200")
+        self.put(limits + "rp0_freq", "1500")
+        self.put(limits + "rpa_freq", "1000")
+        self.put("sys/class/drm/card0/device/hwmon/hwmon1/temp1_input", "48000")
+        (self.root / "sys/class/drm/card0/device/driver").symlink_to("/sys/bus/pci/drivers/xe")
+        arm_gov = self.put("sys/class/drm/card1/device/devfreq/gpu/governor", "simple_ondemand")
+        self.put("sys/class/drm/card1/device/devfreq/gpu/available_governors", "simple_ondemand performance")
+        self.put("sys/class/drm/card1/device/hwmon/hwmon2/temp1_input", "43000")
+        (self.root / "sys/class/drm/card1/device/driver").symlink_to("/sys/bus/platform/drivers/panfrost")
+        self.put("sys/bus/pci/devices/0000:01:00.0/vendor", "0x10de")
+        self.put("sys/bus/pci/devices/0000:01:00.0/class", "0x030200")
+        policy_boost = self.put(self.policy + "boost", "0")
+        self.start_monitor()
+        self.controller.apply("maximo")
+        self.assertEqual(intel_min.read_text().strip(), "1000")
+        self.assertEqual(arm_gov.read_text().strip(), "performance")
+        self.assertEqual(policy_boost.read_text().strip(), "1")
+        self.assertIn("NVIDIA", self.hw.status()["gpu"])
+        self.controller.restore()
+        self.assertEqual(intel_min.read_text().strip(), "300")
+        self.assertEqual(arm_gov.read_text().strip(), "simple_ondemand")
+        self.assertEqual(policy_boost.read_text().strip(), "0")
+
+    def test_storage_selects_pcie_nvme_and_keeps_removable_drive(self):
+        directory = "sys/devices/pci0000:00/0000:00:03.0/nvme/nvme0/nvme0n1"
+        scheduler = self.put(directory + "/queue/scheduler", "none [mq-deadline]")
+        removable = self.put(directory + "/removable", "0")
+        (self.hw.sysfs / "block").mkdir()
+        (self.hw.sysfs / "block/nvme0n1").symlink_to(scheduler.parent.parent)
+        self.assertEqual(self.hw.storage_policy(), {self.hw.sysfs / "block/nvme0n1/queue/scheduler": "none"})
+        removable.write_text("1")
+        self.assertEqual(self.hw.storage_policy(), {})
+
+    def test_haswell_integrated_gpu_uses_package_sensor(self):
+        card = self.root / "sys/class/drm/card0"
+        device = self.root / "sys/devices/pci0000:00/0000:00:02.0"
+        device.mkdir(parents=True)
+        card.mkdir(parents=True)
+        (card / "device").symlink_to(device)
+        (device / "driver").symlink_to("/sys/bus/pci/drivers/i915")
+        (device / "vendor").write_text("0x8086")
+        (device / "device").write_text("0x0a16")
+        minimum = card / "gt_min_freq_mhz"
+        minimum.write_text("200")
+        for name, value in (("gt_max", 1100), ("gt_RPn", 200), ("gt_RP1", 200), ("gt_RP0", 1100)):
+            (card / f"{name}_freq_mhz").write_text(str(value))
+        self.assertNotIn(minimum, self.hw.plan("extremo")[0])
+        self.put("sys/class/hwmon/hwmon0/temp1_label", "Package id 0")
+        self.start_monitor()
+        self.controller.apply("extremo")
+        self.assertEqual(minimum.read_text().strip(), "500")
+        self.temp.unlink()
+        self.controller.guard(self.report.append)
+        self.assertEqual(minimum.read_text().strip(), "200")
+
+    def test_memory_and_scheduler_settings_restore(self):
+        swap = self.put("proc/sys/vm/swappiness", "60")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/swapfile file 1024 0 -2")
+        self.put("proc/meminfo", "MemAvailable: 3145728 kB")
+        scheduler = self.put("sys/devices/ata1/block/sda/queue/scheduler", "[none] mq-deadline")
+        disk = scheduler.parent.parent
+        (disk / "removable").write_text("0")
+        (disk / "device").mkdir()
+        (disk / "device/type").write_text("0")
+        (self.hw.sysfs / "block").mkdir()
+        (self.hw.sysfs / "block/sda").symlink_to(disk)
+        self.start_monitor()
+        write = Path.write_text
+
+        def kernel_write(path, value, *args, **kwargs):
+            if path == scheduler:
+                value = "[none] mq-deadline" if value.strip() == "none" else "none [mq-deadline]"
+            return write(path, value, *args, **kwargs)
+
+        with patch.object(Path, "write_text", kernel_write):
+            self.controller.apply("extremo")
+            self.assertEqual(swap.read_text().strip(), "40")
+            self.assertEqual(scheduler.read_text(), "none [mq-deadline]")
+            self.controller.restore()
+        self.assertEqual(swap.read_text().strip(), "60")
+        self.assertEqual(scheduler.read_text(), "[none] mq-deadline")
+
+    def test_memory_policy_preserves_low_swappiness_and_zram(self):
+        swap = self.put("proc/sys/vm/swappiness", "15")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/swapfile file 1024 0 -2")
+        self.put("proc/meminfo", "MemAvailable: 3145728 kB")
+        self.assertEqual(self.hw.memory_policy(), {})
+        swap.write_text("60")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100")
+        self.assertEqual(self.hw.memory_policy(), {})
 
     def test_hot_sensor_restores_and_never_reactivates(self):
         self.start_monitor()
@@ -288,7 +383,8 @@ class Entrypoints(unittest.TestCase):
         with patch("luomax.cli.Hardware", return_value=plan), patch("luomax.cli.Controller") as controller:
             with patch.object(plan, "plan", return_value=({Path("/test"): "performance"}, [])):
                 with patch.object(plan, "sensors", return_value=[Path("/sensor")]):
-                    with patch.object(plan, "check"), patch("luomax.cli.os.geteuid", return_value=1000):
+                    with patch.object(plan, "check"), patch("luomax.cli.read_setting", return_value="powersave"), \
+                            patch("luomax.cli.os.geteuid", return_value=1000):
                         self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
             controller.return_value.apply.assert_not_called()
             controller.return_value.restore.assert_not_called()

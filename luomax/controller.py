@@ -9,6 +9,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from .hardware import read_setting
+
 
 class MonitorRequired(RuntimeError):
     pass
@@ -82,9 +84,9 @@ class Controller:
         return record
 
     def set_value(self, path, value):
-        if path.read_text().strip() != value:
+        if read_setting(path) != value:
             path.write_text(value + "\n")
-        actual = path.read_text().strip()
+        actual = read_setting(path)
         if actual != value:
             raise RuntimeError(f"{path}: se esperaba {value!r}, el controlador devolvió {actual!r}.")
 
@@ -104,7 +106,7 @@ class Controller:
         for entry in restored:
             path = Path(entry["path"])
             try:
-                if path.read_text().strip() != entry["original"]:
+                if read_setting(path) != entry["original"]:
                     errors.append(f"{path}: el valor original cambió durante la restauración.")
             except OSError as error:
                 errors.append(f"{path}: {error}")
@@ -136,7 +138,7 @@ class Controller:
             settings = {}
             for path, target in changes.items():
                 path = path.resolve(strict=True)
-                settings[path] = {"path": str(path), "original": path.read_text().strip(), "target": target}
+                settings[path] = {"path": str(path), "original": read_setting(path), "target": target}
                 if path.name == "scaling_governor":
                     preference = path.with_name("energy_performance_preference")
                     if preference.exists():
@@ -153,7 +155,7 @@ class Controller:
                         self.set_value(path, entry["target"])
                 self.hardware.check(sensors, expected_power)
                 for path, entry in settings.items():
-                    entry["observed"] = path.read_text().strip()
+                    entry["observed"] = read_setting(path)
                     if entry["target"] is not None and entry["target"] != entry["observed"]:
                         raise RuntimeError(f"{path}: el valor aplicado cambió durante la operación.")
                 self.save(record)
