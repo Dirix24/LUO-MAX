@@ -7,7 +7,7 @@ import sys
 
 from . import __version__
 from .controller import Controller, MonitorRequired
-from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES
+from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES, read_setting
 
 
 def main(argv=None):
@@ -59,7 +59,9 @@ def main(argv=None):
             hardware.check(hardware.sensors(devices), expected_power)
             print("Ajustes candidatos según el estado actual:")
             for path, target in settings.items():
-                print(f"  {path} = {target}")
+                current = read_setting(path)
+                state = "sin cambio" if current == target else f"{current} → {target}"
+                print(f"  {path}: {state}")
             return 0
         if args.command in {"apply", "perfil"} and args.profile in {"extremo", "maximo"}:
             print(MAX_WARNING if args.profile == "maximo" else POWER_WARNING, file=sys.stderr)

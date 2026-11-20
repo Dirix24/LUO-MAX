@@ -143,6 +143,64 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.gov.read_text().strip(), "powersave")
         self.assertFalse(self.controller.journal.exists())
 
+    def test_haswell_integrated_gpu_uses_package_sensor(self):
+        card = self.root / "sys/class/drm/card0"
+        device = self.root / "sys/devices/pci0000:00/0000:00:02.0"
+        device.mkdir(parents=True)
+        card.mkdir(parents=True)
+        (card / "device").symlink_to(device)
+        (device / "driver").symlink_to("/sys/bus/pci/drivers/i915")
+        (device / "vendor").write_text("0x8086")
+        (device / "device").write_text("0x0a16")
+        minimum = card / "gt_min_freq_mhz"
+        minimum.write_text("200")
+        for name, value in (("gt_max", 1100), ("gt_RPn", 200), ("gt_RP1", 200), ("gt_RP0", 1100)):
+            (card / f"{name}_freq_mhz").write_text(str(value))
+        self.assertNotIn(minimum, self.hw.plan("extremo")[0])
+        self.put("sys/class/hwmon/hwmon0/temp1_label", "Package id 0")
+        self.start_monitor()
+        self.controller.apply("extremo")
+        self.assertEqual(minimum.read_text().strip(), "500")
+        self.temp.unlink()
+        self.controller.guard(self.report.append)
+        self.assertEqual(minimum.read_text().strip(), "200")
+
+    def test_memory_and_scheduler_settings_restore(self):
+        swap = self.put("proc/sys/vm/swappiness", "60")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/swapfile file 1024 0 -2")
+        self.put("proc/meminfo", "MemAvailable: 3145728 kB")
+        scheduler = self.put("sys/devices/ata1/block/sda/queue/scheduler", "[none] mq-deadline")
+        disk = scheduler.parent.parent
+        (disk / "removable").write_text("0")
+        (disk / "device").mkdir()
+        (disk / "device/type").write_text("0")
+        (self.hw.sysfs / "block").mkdir()
+        (self.hw.sysfs / "block/sda").symlink_to(disk)
+        self.start_monitor()
+        write = Path.write_text
+
+        def kernel_write(path, value, *args, **kwargs):
+            if path == scheduler:
+                value = "[none] mq-deadline" if value.strip() == "none" else "none [mq-deadline]"
+            return write(path, value, *args, **kwargs)
+
+        with patch.object(Path, "write_text", kernel_write):
+            self.controller.apply("extremo")
+            self.assertEqual(swap.read_text().strip(), "40")
+            self.assertEqual(scheduler.read_text(), "none [mq-deadline]")
+            self.controller.restore()
+        self.assertEqual(swap.read_text().strip(), "60")
+        self.assertEqual(scheduler.read_text(), "[none] mq-deadline")
+
+    def test_memory_policy_preserves_low_swappiness_and_zram(self):
+        swap = self.put("proc/sys/vm/swappiness", "15")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/swapfile file 1024 0 -2")
+        self.put("proc/meminfo", "MemAvailable: 3145728 kB")
+        self.assertEqual(self.hw.memory_policy(), {})
+        swap.write_text("60")
+        self.put("proc/swaps", "Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100")
+        self.assertEqual(self.hw.memory_policy(), {})
+
     def test_hot_sensor_restores_and_never_reactivates(self):
         self.start_monitor()
         self.controller.apply("maximo")
@@ -288,7 +346,8 @@ class Entrypoints(unittest.TestCase):
         with patch("luomax.cli.Hardware", return_value=plan), patch("luomax.cli.Controller") as controller:
             with patch.object(plan, "plan", return_value=({Path("/test"): "performance"}, [])):
                 with patch.object(plan, "sensors", return_value=[Path("/sensor")]):
-                    with patch.object(plan, "check"), patch("luomax.cli.os.geteuid", return_value=1000):
+                    with patch.object(plan, "check"), patch("luomax.cli.read_setting", return_value="powersave"), \
+                            patch("luomax.cli.os.geteuid", return_value=1000):
                         self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
             controller.return_value.apply.assert_not_called()
             controller.return_value.restore.assert_not_called()

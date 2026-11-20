@@ -28,6 +28,16 @@ def optional(path):
         return None
 
 
+def read_setting(path):
+    value = path.read_text().strip()
+    if path.name == "scheduler":
+        active = re.search(r"\[([^\s\[\]]+)\]", value)
+        if not active:
+            raise RuntimeError(f"{path}: no se pudo identificar el planificador activo.")
+        return active[1]
+    return value
+
+
 class Hardware:
     def __init__(self, sysfs=Path("/sys"), proc=Path("/proc")):
         self.sysfs = sysfs
@@ -58,9 +68,25 @@ class Hardware:
     def gpu_sensors(self, device):
         return sorted(device.resolve().glob("hwmon/hwmon*/temp[0-9]*_input"))
 
+    def package_sensor(self, device):
+        if (optional(device / "vendor"), optional(device / "device"), device.resolve().name) != (
+            "0x8086", "0x0a16", "0000:00:02.0"
+        ):
+            return []
+        # The Haswell ULT GT2 is part of the same package reported by coretemp.
+        packages = []
+        for monitor in self.sysfs.glob("class/hwmon/hwmon*"):
+            if optional(monitor / "name") == "coretemp":
+                for label in monitor.resolve().glob("temp[0-9]*_label"):
+                    if (optional(label) or "").startswith("Package id "):
+                        packages.append(label.with_name(label.name.replace("_label", "_input")))
+        return packages if len(packages) == 1 and packages[0].exists() else []
+
     def intel_policy(self, card, profile):
         # Only program frequency limits the i915 driver already exposes.
-        if profile == "alto" or not self.gpu_sensors(card / "device"):
+        device = card / "device"
+        package = self.package_sensor(device)
+        if profile == "alto" or not (self.gpu_sensors(device) or package):
             return {}
         minimum = card / "gt_min_freq_mhz"
         raw = [optional(path) for path in (
@@ -71,6 +97,14 @@ class Hardware:
         current, ceiling, sustained, peak = map(int, raw)
         if not 0 < current <= ceiling <= peak or not 0 < sustained <= peak:
             return {}
+        if package:
+            floor = optional(card / "gt_RPn_freq_mhz")
+            if floor and floor.isascii() and floor.isdigit() and 0 < int(floor) <= current:
+                low = int(floor)
+                # The Haswell GT frequency interface uses 50 MHz steps.
+                divisor = 3 if profile == "extremo" else 2
+                cap = min(ceiling, low + (peak - low) // divisor)
+                sustained = max(sustained, cap // 50 * 50)
         target = min(ceiling, sustained)
         return {minimum: str(target)} if current < target else {}
 
@@ -88,7 +122,7 @@ class Hardware:
         if not sensors:
             raise RuntimeError("Sin sensores válidos de CPU o SoC.")
         for device in gpu_devices:
-            gpu = self.gpu_sensors(device)
+            gpu = self.gpu_sensors(device) or self.package_sensor(device)
             if not gpu:
                 raise RuntimeError(f"Sin sensores para la GPU {device}.")
             sensors.update(gpu)
@@ -118,6 +152,38 @@ class Hardware:
                             limit = min(limit, int(value) - 5000)
             if int(raw) >= limit:
                 raise RuntimeError(f"{path}: {int(raw) / 1000:g} °C (umbral {limit / 1000:g} °C).")
+
+    def storage_policy(self):
+        changes = {}
+        for disk in self.sysfs.glob("block/*"):
+            if not any(re.fullmatch(r"ata[0-9]+", part) for part in disk.resolve().parts):
+                continue
+            if optional(disk / "removable") != "0" or optional(disk / "device/type") != "0":
+                continue
+            scheduler = disk / "queue/scheduler"
+            modes = (optional(scheduler) or "").replace("[", "").replace("]", "").split()
+            if "mq-deadline" in modes:
+                changes[scheduler] = "mq-deadline"
+        return changes
+
+    def memory_policy(self):
+        swappiness = self.proc / "sys/vm/swappiness"
+        value = optional(swappiness) or ""
+        if not value.isascii() or not value.isdigit() or not 40 < int(value) <= 100:
+            return {}
+        if optional(self.sysfs / "module/zswap/parameters/enabled") not in {None, "N"}:
+            return {}
+        memory = re.search(r"^MemAvailable:\s+(\d+)\s+kB", optional(self.proc / "meminfo") or "", re.M)
+        swaps = (optional(self.proc / "swaps") or "").splitlines()[1:]
+        if not memory or int(memory[1]) < 2 * 1024 * 1024 or not swaps:
+            return {}
+        for row in swaps:
+            entry = row.split()
+            if len(entry) != 5 or entry[1] not in {"file", "partition"} or entry[0].startswith(
+                ("/dev/zram", "/dev/ram", "/dev/loop", "/dev/dm-", "/dev/mapper/")
+            ):
+                return {}
+        return {swappiness: "40"}
 
     def plan(self, profile):
         changes = {}
@@ -154,6 +220,9 @@ class Hardware:
                 ):
                     changes[path] = "high" if profile == "maximo" else "auto"
                     gpu_devices.append(device)
+        if profile in {"extremo", "maximo"}:
+            changes.update(self.storage_policy())
+            changes.update(self.memory_policy())
         if not changes:
             raise RuntimeError("El equipo no expone ajustes compatibles con este perfil.")
         return changes, gpu_devices
@@ -182,7 +251,11 @@ class Hardware:
             if busy and busy.isascii() and busy.isdigit() and int(busy) <= 100:
                 detail += f", uso {busy} %"
             if driver_name == "i915" and not self.gpu_sensors(device):
-                detail += ", sin sensor térmico dedicado"
+                detail += (", sensor térmico del paquete" if self.package_sensor(device)
+                           else ", sin sensor térmico compatible")
+            minimum = optional(card / "gt_min_freq_mhz")
+            if minimum and minimum.isascii() and minimum.isdigit():
+                detail += f", mínimo {minimum} MHz"
             gpu_details.append(detail)
         disks = []
         for disk in sorted(self.sysfs.glob("block/*")):
@@ -205,6 +278,12 @@ class Hardware:
             "ram_gib": round(int(total[1]) / 1048576, 2) if total else None,
             "ram_available_gib": round(int(available[1]) / 1048576, 2) if available else None,
             "storage": disks,
+            "storage_scheduler": [
+                f"{p.parent.parent.name}: {read_setting(p)}"
+                for p in sorted(self.sysfs.glob("block/*/queue/scheduler"))
+                if "virtual" not in p.resolve().parts
+            ],
+            "swappiness": optional(self.proc / "sys/vm/swappiness"),
             "temperature_c": max(temperatures, default=None),
             "power": self.power(),
             "governors": sorted({value for p in self.policies()
