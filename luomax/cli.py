@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 
 from . import __version__
@@ -24,8 +25,9 @@ def main(argv=None):
     commands.add_parser("version", help="Mostrar la versión de LUO-MAX")
     restore = commands.add_parser("restore", help="Recuperar y verificar los valores originales")
     restore.add_argument("--offline", action="store_true", help="Exigir que el monitor esté detenido")
-    for name in ("daemon", "gui"):
-        commands.add_parser(name)
+    daemon = commands.add_parser("daemon")
+    daemon.add_argument("--sysv", action="store_true", help=argparse.SUPPRESS)
+    commands.add_parser("gui")
     args = parser.parse_args(argv)
     if args.command == "version":
         print(f"LUO-MAX {__version__}")
@@ -66,7 +68,10 @@ def main(argv=None):
         if os.geteuid() != 0:
             raise PermissionError("Esta operación requiere permisos de administrador.")
         if args.command == "daemon":
-            controller.daemon(lambda message: print(message, flush=True))
+            runtime = Path("/run/luo-max-sysv")
+            controller.daemon(lambda message: print(message, flush=True),
+                              stop_file=runtime / "stop" if args.sysv else None,
+                              ready_file=runtime / "ready" if args.sysv else None)
         elif args.command == "restore" or args.profile == "equilibrado":
             restored = controller.restore(offline=getattr(args, "offline", False))
             print(f"Restauración verificada ({len(restored)} parámetros)." if restored

@@ -6,7 +6,7 @@ fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
 policy=devices/system/cpu/cpufreq/policy0
 sensor=class/hwmon/hwmon0
-mkdir -p "$fixture"/{local,lib,units} "$fixture/sys/$policy" \
+mkdir -p "$fixture"/{local,lib,units,init} "$fixture/sys/$policy" \
     "$fixture/sys/$sensor" "$fixture/sys/class/power_supply"
 printf '%s\n' powersave > "$fixture/sys/$policy/scaling_governor"
 printf '%s\n' 'powersave performance' > "$fixture/sys/$policy/scaling_available_governors"
@@ -16,18 +16,25 @@ printf '%s\n' 0 > "$fixture/sys/devices/system/cpu/cpufreq/boost"
 printf '%s\n' coretemp > "$fixture/sys/$sensor/name"
 printf '%s\n' 39000 > "$fixture/sys/$sensor/temp1_input"
 
+boot_dirs=()
+for level in 0 1 2 3 4 5 6 S; do
+    mkdir "$fixture/rc$level.d"
+    boot_dirs+=(--bind "$fixture/rc$level.d" "/etc/rc$level.d")
+done
+
 # The host is read-only. The only writable system destinations are fixtures.
 bwrap --unshare-user --uid 0 --gid 0 --unshare-pid --unshare-net --die-with-parent \
-    --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+    --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /run \
     --bind "$fixture/local" /usr/local --bind "$fixture/lib" /var/lib \
     --bind "$fixture/sys" /sys --bind "$fixture/units" /etc/systemd/system \
+    --bind "$fixture/init" /etc/init.d "${boot_dirs[@]}" \
     --chdir "$project" /bin/bash -s <<'TEST'
 set -euo pipefail
 governor=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 boost=/sys/devices/system/cpu/cpufreq/boost
 temperature=/sys/class/hwmon/hwmon0/temp1_input
-./install.sh
-./install.sh
+./install.sh --sin-servicio
+./install.sh --sin-servicio
 ./install.sh --destdir /tmp/unit-stage --systemd
 if command -v systemd-analyze >/dev/null; then
     systemd-analyze verify --man=no /tmp/unit-stage/etc/systemd/system/luo-max.service
@@ -72,7 +79,15 @@ test "$(cat "$governor")" = performance
 /usr/local/bin/luo-max perfil equilibrado
 wait "$monitor"
 test "$(cat "$governor")" = powersave
+./install.sh --sysv
+/etc/init.d/luo-max status
+compgen -G '/etc/rc2.d/S*luo-max' >/dev/null
+/usr/local/bin/luo-max perfil alto
+test "$(cat "$governor")" = performance
 ./uninstall.sh
+test "$(cat "$governor")" = powersave
+test ! -e /etc/init.d/luo-max
+if compgen -G '/etc/rc2.d/*luo-max' >/dev/null; then exit 1; fi
 ./uninstall.sh
 test ! -e /usr/local/bin/luo-max
 TEST

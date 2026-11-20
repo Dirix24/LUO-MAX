@@ -180,7 +180,27 @@ class Controller:
                 return False
             return True
 
-    def daemon(self, report, stop=None, profile=None):
+    def recover_at_start(self, report):
+        try:
+            descriptor = os.open(self.journal, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            self.restore_locked()
+            return
+        with os.fdopen(descriptor) as source:
+            boot = json.load(source)["boot_id"]
+        if boot == self.boot_id():
+            self.restore_locked()
+            return
+        # A previous boot's sysfs paths can point to different devices.
+        with tempfile.NamedTemporaryFile(prefix="sesion-arranque-anterior-", suffix=".json",
+                                         dir=self.state, delete=False) as archive:
+            archive_path = Path(archive.name)
+        os.replace(self.journal, archive_path)
+        self.sync_directory()
+        report(f"Diario de otro arranque archivado en {archive_path}.")
+        self.restore_locked()
+
+    def daemon(self, report, stop=None, profile=None, stop_file=None, ready_file=None):
         if stop is None:
             stop = threading.Event()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -192,8 +212,10 @@ class Controller:
                     fcntl.flock(monitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as error:
                     raise RuntimeError("Ya existe un monitor activo.") from error
-                self.restore_locked()
+                self.recover_at_start(report)
             try:
+                if ready_file is not None:
+                    ready_file.touch(mode=0o600)
                 if profile is None:
                     report("Monitor activo. En espera de selección manual.")
                 else:
@@ -202,11 +224,17 @@ class Controller:
                     for path in changed:
                         report(f"  {path}")
                 while not stop.wait(2):
+                    if stop_file is not None and stop_file.exists():
+                        break
                     if not self.guard(report) and profile is not None:
                         break
             finally:
-                with self.transaction():
-                    try:
-                        self.restore_locked()
-                    finally:
-                        fcntl.flock(monitor, fcntl.LOCK_UN)
+                try:
+                    with self.transaction():
+                        try:
+                            self.restore_locked()
+                        finally:
+                            fcntl.flock(monitor, fcntl.LOCK_UN)
+                finally:
+                    if ready_file is not None:
+                        ready_file.unlink(missing_ok=True)

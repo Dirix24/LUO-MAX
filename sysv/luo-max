@@ -1,0 +1,70 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          luo-max
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Monitor térmico de LUO-MAX
+### END INIT INFO
+# LUO-MAX SysV monitor
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+runtime=/run/luo-max-sysv
+
+running() {
+    ! flock -n -E 75 "$runtime/monitor.lock" true
+}
+
+if [ "${1:-}" = supervise ]; then
+    while [ ! -e "$runtime/stop" ]; do
+        rm -f "$runtime/ready"
+        /usr/local/bin/luo-max daemon --sysv >"$runtime/monitor.log" 2>&1 || :
+        rm -f "$runtime/ready"
+        [ -e "$runtime/stop" ] || sleep 5
+    done
+    exit 0
+fi
+
+install -d -m 0700 "$runtime"
+exec 9>"$runtime/service.lock"
+flock 9
+case "${1:-}" in
+    start)
+        if ! running; then
+            rm -f "$runtime/stop" "$runtime/ready"
+            nohup flock -n "$runtime/monitor.lock" /etc/init.d/luo-max supervise \
+                </dev/null >/dev/null 2>&1 9>&- &
+        fi
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -e "$runtime/ready" ] && running; then exit 0; fi
+            sleep 0.3
+        done
+        cat "$runtime/monitor.log" >&2
+        exit 1
+        ;;
+    stop)
+        touch "$runtime/stop"
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            if ! running; then
+                rm -f "$runtime/ready"
+                exit 0
+            fi
+            sleep 1
+        done
+        echo 'LUO-MAX: el monitor no terminó; revisa /run/luo-max-sysv/monitor.log.' >&2
+        exit 1
+        ;;
+    status)
+        if [ -e "$runtime/ready" ] && running; then
+            echo 'Monitor LUO-MAX activo.'
+        else
+            echo 'Monitor LUO-MAX inactivo.'
+            exit 3
+        fi
+        ;;
+    *)
+        echo "Uso: $0 {start|stop|status}" >&2
+        exit 2
+        ;;
+esac

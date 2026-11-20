@@ -44,7 +44,8 @@ class Profiles(unittest.TestCase):
 
         def report(message):
             self.report.append(message)
-            ready.set()
+            if message.startswith("Monitor activo"):
+                ready.set()
 
         def monitor():
             try:
@@ -251,6 +252,16 @@ class Profiles(unittest.TestCase):
             self.controller.restore()
         self.assertEqual(legacy.read_text(), "legacy")
 
+    def test_daemon_archives_prior_boot_without_writing(self):
+        self.controller.prepare()
+        stale = {"boot_id": "old-boot", "settings": [{"path": str(self.gov), "original": "old-policy"}]}
+        self.controller.save(stale)
+        self.start_monitor()
+        self.assertFalse(self.controller.journal.exists())
+        archive, = self.controller.state.glob("sesion-arranque-anterior-*.json")
+        self.assertEqual(json.loads(archive.read_text()), stale)
+        self.assertEqual(self.gov.read_text().strip(), "powersave")
+
     def test_record_keeps_intent_and_observed_values(self):
         self.start_monitor()
         self.controller.apply("maximo")
@@ -305,6 +316,13 @@ class Entrypoints(unittest.TestCase):
             self.assertFalse(executable.is_symlink())
             self.assertFalse((stage / "etc/systemd/system/luo-max.service").exists())
             self.assertFalse((stage / "usr/local/lib/luo-max").exists())
+            subprocess.run([str(project / "install.sh"), "--sysv", "--destdir", staging],
+                           check=True, capture_output=True, cwd="/")
+            init = stage / "etc/init.d/luo-max"
+            self.assertTrue(init.is_file())
+            self.assertNotEqual(init.stat().st_mode & 0o111, 0)
+            subprocess.run(uninstall, check=True, capture_output=True, cwd="/")
+            self.assertFalse(init.exists())
 
 
 if __name__ == "__main__":
