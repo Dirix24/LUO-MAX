@@ -17,19 +17,26 @@ fi
 app="$root/usr/local/lib/luo-max"
 bin="$root/usr/local/bin/luo-max"
 unit="$root/etc/systemd/system/luo-max.service"
+init="$root/etc/init.d/luo-max"
 if [[ -f $unit ]] && ! grep -qx 'Description=LUO-MAX thermal and power monitor' "$unit"; then
     echo 'Unidad anterior detectada. Consulta docs/MIGRACION.md.' >&2
     exit 1
 fi
+if [[ -e $init ]] && ! grep -qx '# LUO-MAX SysV monitor' "$init"; then
+    echo "El script $init pertenece a otra instalación." >&2
+    exit 1
+fi
 if [[ -z $root ]]; then
-    if [[ -f $unit ]]; then systemctl stop luo-max.service; fi
+    if [[ -f $unit && -d /run/systemd/system ]]; then systemctl stop luo-max.service; fi
+    if [[ -x $init ]]; then "$init" stop; fi
     if [[ -x $app/luo-max.py ]]; then
         "$app/luo-max.py" restore --offline
     elif [[ -e /var/lib/luo-max/session.json || -e /var/lib/luo-max/backup.json ]]; then
         echo 'Hay una copia pendiente y falta el ejecutable para restaurarla.' >&2
         exit 1
     fi
-    if [[ -f $unit ]]; then systemctl disable luo-max.service; fi
+    if [[ -f $unit ]]; then systemctl --root=/ disable luo-max.service; fi
+    if [[ -f $init ]]; then update-rc.d -f luo-max remove; fi
 fi
 if [[ -L $bin && "$(readlink -- "$bin")" == ../lib/luo-max/luo-max.py ]]; then rm -- "$bin"; fi
 rm -f -- "$app/luo-max.py" "$app"/luomax/{__init__,cli,controller,gui,hardware}.py \
@@ -43,7 +50,8 @@ for directory in "$app/luomax" "$app/assets" "$app"; do
 done
 if [[ -f $unit ]]; then
     rm -- "$unit"
-    if [[ -z $root ]]; then systemctl daemon-reload; fi
+    if [[ -z $root && -d /run/systemd/system ]]; then systemctl daemon-reload; fi
 fi
+rm -f -- "$init"
 # Keep the lock inodes stable across uninstalls and concurrent commands.
 echo 'LUO-MAX desinstalado.'
