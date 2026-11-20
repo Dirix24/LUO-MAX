@@ -5,9 +5,7 @@
   <img src="assets/logo-claro.svg" alt="LUO-MAX · engranaje y rayo" width="296">
 </picture>
 
-LUO-MAX (Linux Universal Optimizer) permite consultar el hardware y aplicar políticas de rendimiento Linux supervisadas y reversibles. Incluye una CLI y una interfaz gráfica opcional. Trabaja con los controles que exponen el kernel y los controladores, dentro de los límites configurados por el fabricante.
-
-![Interfaz gráfica ejecutada en Debian 13](docs/capturas/gui.png)
+LUO-MAX (Linux Universal Optimizer) permite consultar el hardware y aplicar políticas de rendimiento Linux supervisadas y reversibles. 
 
 ## Comandos para MX Linux
 
