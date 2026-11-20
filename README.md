@@ -9,6 +9,20 @@ LUO-MAX (Linux Universal Optimizer) permite consultar el hardware y aplicar pol�
 
 ![Interfaz gráfica ejecutada en Debian 13](docs/capturas/gui.png)
 
+## Inicio rápido en MX Linux
+
+```sh
+sudo ./install.sh
+luo-max --version
+sudo luo-max perfil alto
+```
+
+`perfil` arranca el monitor en la misma terminal si hace falta. Déjala abierta durante la partida. Pulsa Ctrl+C para restaurar y cerrar esa sesión, o ejecuta `sudo luo-max perfil equilibrado` desde otra terminal. Si ya existe un monitor, el comando lo reutiliza. La idea de aplicar ajustes a demanda se inspira en [GameMode de Feral Interactive](https://github.com/FeralInteractive/gamemode). Equilibrado devuelve la gestión al sistema, incluso si el valor original era `performance`.
+
+```sh
+sudo ./uninstall.sh
+```
+
 ## Requisitos e instalación
 
 - Linux con Python 3.9 o posterior en `/usr/bin/python3`, Bash y utilidades GNU.
@@ -34,7 +48,7 @@ El instalador deja el servicio disponible para iniciar manualmente. Durante el a
 | **Extremo** | `sudo luo-max apply extremo --confirm-risks` | Añade preferencia energética de rendimiento donde el controlador la exponga. Comprueba sensores y alimentación. |
 | **Máximo** | `sudo luo-max apply maximo --confirm-risks` | Habilita el boost de fábrica cuando esté disponible y puede seleccionar el modo `high` de AMDGPU con sensores asociados. Requiere confirmación y comprueba sensores y alimentación. |
 
-Consulta los ajustes candidatos con `luo-max apply maximo --dry-run`. La simulación consulta atributos y restricciones actuales. El conjunto real se calcula tras restaurar una sesión previa, si existe. Algunas máquinas exponen los mismos controles para más de un perfil. Intel y NVIDIA figuran en el inventario de GPU. Los ajustes de GPU se limitan a modos reversibles del controlador AMDGPU. En CPU se usan [CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html), los [controles de Intel P-State](https://docs.kernel.org/admin-guide/pm/intel_pstate.html) y los atributos compatibles del controlador. Consulta los [controles térmicos y de energía de AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html).
+Consulta los ajustes candidatos con `luo-max apply maximo --dry-run`. La simulación consulta atributos y restricciones actuales. El conjunto real se calcula tras restaurar una sesión previa, si existe. Algunas máquinas exponen los mismos controles para más de un perfil. La GPU AMD puede usar modos reversibles de AMDGPU. En Intel i915, Extremo y Máximo pueden elevar la frecuencia mínima hasta RP1 si el controlador publica los límites y la GPU tiene telemetría térmica propia. El tope vigente se respeta. NVIDIA figura en el inventario. RAM y discos se consultan para diagnóstico. En CPU se usan [CPUFreq](https://docs.kernel.org/admin-guide/pm/cpufreq.html), los [controles de Intel P-State](https://docs.kernel.org/admin-guide/pm/intel_pstate.html) y los atributos compatibles del controlador. Consulta los [controles térmicos y de energía de AMDGPU](https://docs.kernel.org/gpu/amdgpu/thermal.html).
 
 ### Protección térmica
 
@@ -67,7 +81,7 @@ python3 -m unittest discover -s tests -v
 bash tests/integration-linux.sh   # requiere bubblewrap y espacios de nombres de usuario
 ```
 
-GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes una sesión con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. El proyecto se entrega como candidato a revisión humana.
+GitHub Actions ejecuta las pruebas en Ubuntu 24.04 con Python 3.9 y 3.13. La validación local usó sysfs simulado para todas las escrituras. Siguen pendientes una sesión con systemd como gestor activo, la autenticación gráfica de Polkit y pruebas de escritura y restauración en hardware autorizado Intel, AMD, NVIDIA y ARM. La tabla refleja las rutas que se verificaron. En MX Linux, el usuario comprobó Alto y la restauración sobre un Intel i7-4500U que ya usaba el governor `performance`. La política i915 de esta versión se probó con atributos simulados. El proyecto se entrega como candidato a revisión humana.
 
 ## Licencia y desarrollo con IA
 

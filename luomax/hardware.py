@@ -55,6 +55,25 @@ class Hardware:
             return "desconocida"
         return "sin batería detectada"
 
+    def gpu_sensors(self, device):
+        return sorted(device.resolve().glob("hwmon/hwmon*/temp[0-9]*_input"))
+
+    def intel_policy(self, card, profile):
+        # Only program frequency limits the i915 driver already exposes.
+        if profile == "alto" or not self.gpu_sensors(card / "device"):
+            return {}
+        minimum = card / "gt_min_freq_mhz"
+        raw = [optional(path) for path in (
+            minimum, card / "gt_max_freq_mhz", card / "gt_RP1_freq_mhz", card / "gt_RP0_freq_mhz"
+        )]
+        if not all(value and value.isascii() and value.isdigit() for value in raw):
+            return {}
+        current, ceiling, sustained, peak = map(int, raw)
+        if not 0 < current <= ceiling <= peak or not 0 < sustained <= peak:
+            return {}
+        target = min(ceiling, sustained)
+        return {minimum: str(target)} if current < target else {}
+
     def sensors(self, gpu_devices=()):
         sensors = set()
         cpu_names = {"coretemp", "k10temp", "zenpower", "cpu_thermal"}
@@ -69,7 +88,7 @@ class Hardware:
         if not sensors:
             raise RuntimeError("Sin sensores válidos de CPU o SoC.")
         for device in gpu_devices:
-            gpu = sorted(device.resolve().glob("hwmon/hwmon*/temp[0-9]*_input"))
+            gpu = self.gpu_sensors(device)
             if not gpu:
                 raise RuntimeError(f"Sin sensores para la GPU {device}.")
             sensors.update(gpu)
@@ -122,7 +141,14 @@ class Hardware:
                 device = card / "device"
                 driver = device / "driver"
                 path = device / "power_dpm_force_performance_level"
-                current = optional(path) if driver.resolve().name == "amdgpu" else None
+                driver_name = driver.resolve().name
+                if driver_name == "i915":
+                    candidate = self.intel_policy(card, profile)
+                    if candidate:
+                        changes.update(candidate)
+                        gpu_devices.append(device)
+                    continue
+                current = optional(path) if driver_name == "amdgpu" else None
                 if current in {"auto", "low", "high"} and (
                     profile == "maximo" or current == "low"
                 ):
@@ -140,12 +166,24 @@ class Hardware:
         available = re.search(r"^MemAvailable:\s+(\d+)", meminfo, re.M)
         vendors = {"0x8086": "Intel", "0x1002": "AMD", "0x10de": "NVIDIA"}
         gpus = []
+        gpu_details = []
         for card in self.cards():
             device = card / "device"
             vendor = optional(device / "vendor")
             driver = device / "driver"
             label = vendors.get(vendor, vendor or (driver.resolve().name if driver.is_symlink() else card.name))
             gpus.append(label)
+            driver_name = driver.resolve().name if driver.is_symlink() else "controlador desconocido"
+            detail = f"{card.name}: {label} ({driver_name})"
+            frequency = optional(card / "gt_cur_freq_mhz")
+            busy = optional(device / "gpu_busy_percent")
+            if frequency and frequency.isascii() and frequency.isdigit():
+                detail += f", {frequency} MHz"
+            if busy and busy.isascii() and busy.isdigit() and int(busy) <= 100:
+                detail += f", uso {busy} %"
+            if driver_name == "i915" and not self.gpu_sensors(device):
+                detail += ", sin sensor térmico dedicado"
+            gpu_details.append(detail)
         disks = []
         for disk in sorted(self.sysfs.glob("block/*")):
             if "virtual" in disk.resolve().parts:
@@ -163,6 +201,7 @@ class Hardware:
         return {
             "cpu": model[1] if model else "Sin modelo disponible",
             "gpu": gpus,
+            "gpu_details": gpu_details,
             "ram_gib": round(int(total[1]) / 1048576, 2) if total else None,
             "ram_available_gib": round(int(available[1]) / 1048576, 2) if available else None,
             "storage": disks,

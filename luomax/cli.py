@@ -4,24 +4,32 @@ import json
 import os
 import sys
 
-from .controller import Controller
+from . import __version__
+from .controller import Controller, MonitorRequired
 from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="LUO-MAX · Políticas de rendimiento Linux")
+    parser.add_argument("--version", action="version", version=f"LUO-MAX {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     status = commands.add_parser("status", help="Inventario y estado actual del hardware")
     status.add_argument("--json", action="store_true")
     apply = commands.add_parser("apply", help="Aplicar un perfil con supervisión")
-    apply.add_argument("profile", choices=PROFILES, default="equilibrado", nargs="?")
-    apply.add_argument("--confirm-risks", action="store_true")
-    apply.add_argument("--dry-run", action="store_true", help="Consultar los ajustes candidatos sin escribir")
+    profile = commands.add_parser("perfil", help="Elegir perfil e iniciar el monitor si hace falta")
+    for command in (apply, profile):
+        command.add_argument("profile", choices=PROFILES, default="equilibrado", nargs="?")
+        command.add_argument("--confirm-risks", action="store_true")
+        command.add_argument("--dry-run", action="store_true", help="Consultar los ajustes candidatos sin escribir")
+    commands.add_parser("version", help="Mostrar la versión de LUO-MAX")
     restore = commands.add_parser("restore", help="Recuperar y verificar los valores originales")
     restore.add_argument("--offline", action="store_true", help="Exigir que el monitor esté detenido")
     for name in ("daemon", "gui"):
         commands.add_parser(name)
     args = parser.parse_args(argv)
+    if args.command == "version":
+        print(f"LUO-MAX {__version__}")
+        return 0
     hardware = Hardware()
     controller = Controller(hardware)
     try:
@@ -40,7 +48,7 @@ def main(argv=None):
                 raise RuntimeError("Abre la aplicación gráfica con tu usuario habitual.")
             from .gui import launch
             return launch()
-        if args.command == "apply" and args.dry_run:
+        if args.command in {"apply", "perfil"} and args.dry_run:
             if args.profile == "equilibrado":
                 print("Equilibrado restauraría la sesión pendiente, si existe.")
                 return 0
@@ -51,7 +59,7 @@ def main(argv=None):
             for path, target in settings.items():
                 print(f"  {path} = {target}")
             return 0
-        if args.command == "apply" and args.profile in {"extremo", "maximo"}:
+        if args.command in {"apply", "perfil"} and args.profile in {"extremo", "maximo"}:
             print(MAX_WARNING if args.profile == "maximo" else POWER_WARNING, file=sys.stderr)
             if not args.confirm_risks:
                 raise RuntimeError("Confirma la activación explícita con --confirm-risks.")
@@ -64,7 +72,13 @@ def main(argv=None):
             print(f"Restauración verificada ({len(restored)} parámetros)." if restored
                   else "No hay cambios de LUO-MAX pendientes de restaurar.")
         else:
-            changed = controller.apply(args.profile)
+            try:
+                changed = controller.apply(args.profile)
+            except MonitorRequired:
+                if args.command != "perfil":
+                    raise
+                controller.daemon(lambda message: print(message, flush=True), profile=args.profile)
+                return 0
             print(f"Perfil {args.profile} supervisado. Parámetros modificados: {len(changed)}.")
             for path in changed:
                 print(f"  {path}")

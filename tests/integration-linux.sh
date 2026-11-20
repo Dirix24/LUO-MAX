@@ -60,6 +60,18 @@ printf '%s\n' 39000 > "$temperature"
 kill -TERM "$monitor"
 wait "$monitor"
 test "$(cat "$governor")" = powersave
+/usr/local/bin/luo-max --version
+/usr/local/bin/luo-max perfil alto >/tmp/perfil.log 2>&1 &
+monitor=$!
+for i in {1..50}; do
+    if grep -q 'Perfil alto:' /tmp/perfil.log; then break; fi
+    sleep 0.1
+done
+grep -q 'Perfil alto:' /tmp/perfil.log
+test "$(cat "$governor")" = performance
+/usr/local/bin/luo-max perfil equilibrado
+wait "$monitor"
+test "$(cat "$governor")" = powersave
 ./uninstall.sh
 ./uninstall.sh
 test ! -e /usr/local/bin/luo-max

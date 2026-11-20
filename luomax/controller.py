@@ -10,6 +10,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class MonitorRequired(RuntimeError):
+    pass
+
+
 class Controller:
     def __init__(self, hardware, state=Path("/var/lib/luo-max")):
         self.hardware = hardware
@@ -121,7 +125,7 @@ class Controller:
             return self.restore()
         with self.transaction():
             if not self.monitor_running():
-                raise RuntimeError("Inicia primero el monitor LUO-MAX.")
+                raise MonitorRequired("Inicia primero el monitor LUO-MAX.")
             existing = self.load()
             if existing:
                 self.restore_locked()
@@ -166,15 +170,17 @@ class Controller:
         with self.transaction():
             record = self.load()
             if record is None:
-                return
+                return False
             try:
                 self.hardware.check([Path(path) for path in record["sensors"]], record["expected_power"])
             except (OSError, RuntimeError) as error:
                 report(f"Protección térmica o eléctrica: {error}")
                 self.restore_locked()
                 report("Valores originales verificados. El perfil requiere reactivación manual.")
+                return False
+            return True
 
-    def daemon(self, report, stop=None):
+    def daemon(self, report, stop=None, profile=None):
         if stop is None:
             stop = threading.Event()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -188,9 +194,16 @@ class Controller:
                     raise RuntimeError("Ya existe un monitor activo.") from error
                 self.restore_locked()
             try:
-                report("Monitor activo. En espera de selección manual.")
+                if profile is None:
+                    report("Monitor activo. En espera de selección manual.")
+                else:
+                    changed = self.apply(profile)
+                    report(f"Perfil {profile}: {len(changed)} ajustes modificados. Ctrl+C para restaurar y salir.")
+                    for path in changed:
+                        report(f"  {path}")
                 while not stop.wait(2):
-                    self.guard(report)
+                    if not self.guard(report) and profile is not None:
+                        break
             finally:
                 with self.transaction():
                     try:

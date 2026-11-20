@@ -111,6 +111,37 @@ class Profiles(unittest.TestCase):
         self.controller.guard(self.report.append)
         self.assertEqual(gpu.read_text().strip(), "auto")
 
+    def test_i915_bounds_and_thermal_rollback(self):
+        card = "sys/class/drm/card0"
+        self.put(f"{card}/device/vendor", "0x8086")
+        (self.root / card / "device/driver").symlink_to("/sys/bus/pci/drivers/i915")
+        minimum = self.put(f"{card}/gt_min_freq_mhz", "200")
+        self.put(f"{card}/gt_max_freq_mhz", "700")
+        self.put(f"{card}/gt_RP1_freq_mhz", "800")
+        self.put(f"{card}/gt_RP0_freq_mhz", "1000")
+        self.assertNotIn(minimum, self.hw.plan("extremo")[0])
+        temp = self.put(f"{card}/device/hwmon/hwmon1/temp1_input", "48000")
+        self.start_monitor()
+        self.controller.apply("extremo")
+        self.assertEqual(minimum.read_text().strip(), "700")
+        temp.write_text("81000")
+        self.controller.guard(self.report.append)
+        self.assertEqual(minimum.read_text().strip(), "200")
+
+    def test_profile_monitor_restores_on_exit(self):
+        stop = threading.Event()
+        observed = []
+
+        def report(message):
+            if message.startswith("Perfil alto:"):
+                observed.append(self.gov.read_text().strip())
+                stop.set()
+
+        self.controller.daemon(report, stop=stop, profile="alto")
+        self.assertEqual(observed, ["performance"])
+        self.assertEqual(self.gov.read_text().strip(), "powersave")
+        self.assertFalse(self.controller.journal.exists())
+
     def test_hot_sensor_restores_and_never_reactivates(self):
         self.start_monitor()
         self.controller.apply("maximo")
@@ -250,6 +281,12 @@ class Entrypoints(unittest.TestCase):
                         self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
             controller.return_value.apply.assert_not_called()
             controller.return_value.restore.assert_not_called()
+
+    def test_version_is_available_without_privileges(self):
+        project = Path(__file__).resolve().parents[1]
+        result = subprocess.run([str(project / "luo-max.py"), "--version"], check=True,
+                                capture_output=True, text=True)
+        self.assertRegex(result.stdout, r"^LUO-MAX \d+\.\d+\.\d+\n$")
 
     def test_repeat_staged_install_and_uninstall(self):
         project = Path(__file__).resolve().parents[1]
