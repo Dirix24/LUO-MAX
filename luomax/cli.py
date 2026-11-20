@@ -7,7 +7,7 @@ import sys
 
 from . import __version__
 from .controller import Controller, MonitorRequired
-from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES
+from .hardware import Hardware, MAX_WARNING, POWER_WARNING, PROFILES, setting_component
 
 
 def main(argv=None):
@@ -64,10 +64,17 @@ def main(argv=None):
             expected_power = hardware.power() if args.profile in {"extremo", "maximo"} else None
             hardware.check(hardware.sensors(devices, settings), expected_power)
             print("Ajustes candidatos según el estado actual:")
+            by_component = {}
             for path, target in settings.items():
                 current = hardware.read_setting(path)
-                state = "sin cambio" if current == target else f"{current} → {target}"
-                print(f"  {path}: {state}")
+                state = f"sin cambio ({current})" if current == target else f"{current} → {target}"
+                by_component.setdefault(setting_component(path), []).append(f"  {path}: {state}")
+            for component, details in by_component.items():
+                print(component)
+                print("\n".join(details))
+            for component in ("CPU", "GPU", "RAM", "Disco"):
+                if component not in by_component and (component != "GPU" or "GPU NVIDIA" not in by_component):
+                    print(f"{component}: sin ajuste candidato para este perfil.")
             return 0
         if args.command in {"apply", "perfil"} and args.profile in {"extremo", "maximo"}:
             print(MAX_WARNING if args.profile == "maximo" else POWER_WARNING, file=sys.stderr)
@@ -97,7 +104,7 @@ def main(argv=None):
                 return 0
             print(f"Perfil {args.profile} supervisado. Parámetros modificados: {len(changed)}.")
             for path in changed:
-                print(f"  {path}")
+                print(f"  [{setting_component(Path(path))}] {path}")
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, ImportError) as error:
         print(f"LUO-MAX: {error}", file=sys.stderr)
         return 1

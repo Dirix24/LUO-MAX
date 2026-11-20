@@ -66,6 +66,18 @@ def nvidia_uuid(path):
     return path.parent.name if GPU_UUID.fullmatch(path.parent.name) else None
 
 
+def setting_component(path):
+    if path.name == "swappiness":
+        return "RAM"
+    if path.name == "scheduler":
+        return "Disco"
+    if nvidia_uuid(path):
+        return "GPU NVIDIA"
+    if path.name in {"governor", "min_freq", "gt_min_freq_mhz", "power_dpm_force_performance_level"}:
+        return "GPU"
+    return "CPU"
+
+
 class Hardware:
     def __init__(self, sysfs=Path("/sys"), proc=Path("/proc")):
         self.sysfs = sysfs
@@ -333,6 +345,10 @@ class Hardware:
                 path = cpu / relative
                 if optional(path) in {"0", "1"}:
                     changes[path] = target
+            for bias in sorted(cpu.glob("cpu[0-9]*/power/energy_perf_bias")):
+                value = optional(bias) or ""
+                if re.fullmatch(r"[0-9]|1[0-5]", value):
+                    changes[bias] = "0"
         for card in self.cards():
             candidate = self.gpu_policy(card, profile)
             if candidate:

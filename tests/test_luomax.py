@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 import subprocess
@@ -98,6 +100,19 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.epp.read_text().strip(), "balance_power")
         self.assertEqual(self.boost.read_text().strip(), "0")
         self.assertFalse(self.controller.journal.exists())
+
+    def test_maximum_intel_energy_bias_restores_originals(self):
+        first = self.put("sys/devices/system/cpu/cpu0/power/energy_perf_bias", "6")
+        second = self.put("sys/devices/system/cpu/cpu1/power/energy_perf_bias", "6")
+        self.start_monitor()
+        self.controller.apply("extremo")
+        self.assertEqual(first.read_text().strip(), "6")
+        self.controller.apply("maximo")
+        self.assertEqual(first.read_text().strip(), "0")
+        self.assertEqual(second.read_text().strip(), "0")
+        self.controller.restore()
+        self.assertEqual(first.read_text().strip(), "6")
+        self.assertEqual(second.read_text().strip(), "6")
 
     def test_maximum_amd_gpu_covered_and_restored(self):
         gpu = self.put("sys/class/drm/card0/device/power_dpm_force_performance_level", "auto")
@@ -425,7 +440,11 @@ class Entrypoints(unittest.TestCase):
                 with patch.object(plan, "sensors", return_value=[Path("/sensor")]):
                     with patch.object(plan, "check"), patch.object(plan, "read_setting", return_value="powersave"), \
                             patch("luomax.cli.os.geteuid", return_value=1000):
-                        self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
+                        preview = StringIO()
+                        with redirect_stdout(preview):
+                            self.assertEqual(main(["apply", "alto", "--dry-run"]), 0)
+                        self.assertIn("powersave → performance", preview.getvalue())
+                        self.assertIn("GPU: sin ajuste candidato", preview.getvalue())
             controller.return_value.apply.assert_not_called()
             controller.return_value.restore.assert_not_called()
 

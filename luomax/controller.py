@@ -9,6 +9,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from .hardware import setting_component
+
 
 
 class MonitorRequired(RuntimeError):
@@ -223,7 +225,7 @@ class Controller:
                     changed = self.apply(profile, nvidia_factory=nvidia_factory)
                     report(f"Perfil {profile}: {len(changed)} ajustes modificados. Ctrl+C para restaurar y salir.")
                     for path in changed:
-                        report(f"  {path}")
+                        report(f"  [{setting_component(Path(path))}] {path}")
                 while not stop.wait(2):
                     if stop_file is not None and stop_file.exists():
                         break
