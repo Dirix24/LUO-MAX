@@ -1,0 +1,20 @@
+[Unit]
+Description=LUO-MAX thermal and power monitor
+ConditionFileIsExecutable=/usr/local/bin/luo-max
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/luo-max daemon
+ExecStopPost=/usr/local/bin/luo-max restore
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/sys
+StateDirectory=luo-max
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
